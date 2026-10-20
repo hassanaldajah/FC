@@ -1,0 +1,9 @@
+PyQt6
+pynput
+comtypes
+Pillow
+PyMuPDF
+imageio-ffmpeg
+pyzipper
+python-pptx
+pdf2docx
