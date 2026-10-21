@@ -6,7 +6,7 @@ import sys
 from PyInstaller.utils.hooks import collect_data_files
 
 WIN = sys.platform == "win32"
-datas = [("hex.qml", "."), ("fc.ico", "."), ("fc.png", "."), ("icons", "icons")]
+datas = [("hex.qml", "."), ("fc.ico", "."), ("fc.png", "."), ("fc-mark.png", "."), ("icons", "icons")]
 datas += collect_data_files("imageio_ffmpeg", subdir="binaries")   # the bundled ffmpeg
 
 a = Analysis(
@@ -19,10 +19,10 @@ a = Analysis(
 )
 # Parts of Qt and OpenCV that FC never loads: leaving them out makes the exe
 # much smaller and quicker to start. Re-test the app after changing this list.
-UNUSED = ("quick3d", "designer", "qt6pdf", "multimedia", "avcodec", "avformat", "avutil",
-          "swscale", "swresample", "websockets", "webchannel", "texttospeech", "sensors",
-          "remoteobjects", "positioning", "qttest", "qt6test", "translations",
-          "opencv_videoio_ffmpeg")
+UNUSED = ("quick3d", "designer", "qt6pdf", "multimedia", "websockets", "webchannel", "texttospeech",
+          "sensors", "remoteobjects", "positioning", "qttest", "qt6test", "translations")
+if WIN:   # on Linux the OpenCV module links libavcodec & co. directly, so those must stay
+    UNUSED += ("avcodec", "avformat", "avutil", "swscale", "swresample", "opencv_videoio_ffmpeg")
 
 
 def keep(entry):

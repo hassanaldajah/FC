@@ -111,6 +111,7 @@ jobs:
 
       - name: Wrap it in an AppImage and write its checksum
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq desktop-file-utils   # appimagetool validates FC.desktop
           bash packaging/linux/build-appimage.sh "$VERSION"
           echo "APPIMAGE=dist/FC-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
           cat "dist/FC-${VERSION}-x86_64.AppImage.sha256"

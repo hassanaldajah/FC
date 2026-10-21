@@ -10,6 +10,7 @@ nothing is overwritten and nothing leaves the computer.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import logging
 import math
 import os
@@ -26,10 +27,11 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 from PyQt6.QtCore import (QObject, QPoint, QPointF, Qt, QThread, QTimer, QUrl, pyqtProperty,
                           pyqtSignal, pyqtSlot)
-from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QImage, QPolygonF, QRegion
+from PyQt6.QtGui import QColor, QCursor, QDesktopServices, QGuiApplication, QIcon, QImage, QPolygonF, QRegion
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtQuick import QQuickImageProvider, QQuickView
-from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+                             QInputDialog, QLabel, QLineEdit, QVBoxLayout)
 
 import explorer
 import file_tools
@@ -39,7 +41,7 @@ import scanner
 IS_WIN = sys.platform == "win32"
 APP_ID = "HassanAldajah.FC"
 INSTANCE_KEY = "FC-single-instance"
-VERSION = "1.0.0"                     # keep in step with version_info.txt and the release tag
+VERSION = "1.1.0"                     # keep in step with version_info.txt and the release tag
 HERE = Path(__file__).resolve().parent
 if IS_WIN:
     LOG_DIR = Path(os.environ.get("LOCALAPPDATA", str(HERE))) / "FC"
@@ -48,7 +50,7 @@ else:
     LOG_DIR = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "FC"
 
 SIDES = 8                            # panes in the octagon; must match sideCount in hex.qml
-HOME = [("Choose files", "home:pick"), ("Scan", "home:scan"), ("Recent", ">Recent"),
+HOME = [("Choose files", "home:pick"), ("Scan", ">Scan"), ("Recent", ">Recent"),
         ("PDF", "home:pdf"), ("Images", "home:images"), ("Office", "home:office"),
         ("Media", "home:media"), ("Other files", "home:other")]
 PICK_FILTERS = {
@@ -63,7 +65,7 @@ PICK_FILTERS = {
 # clear, consistent colours (Apple system colours, dark-mode values)
 COLORS = {"pdf": "#ff453a", "image": "#30d158", "office": "#0a84ff", "media": "#bf5af2",
           "pick": "#5e5ce6", "other": "#ac8e68", "scan": "#64d2ff", "recent": "#ff9f0a", "neutral": "#636366"}
-HOME_COLOR = {"home:pick": "pick", ">Recent": "recent", "home:pdf": "pdf", "home:images": "image",
+HOME_COLOR = {">Scan": "scan", "virus:check": "scan", "home:pick": "pick", ">Recent": "recent", "home:pdf": "pdf", "home:images": "image",
               "home:office": "office", "home:media": "media", "home:other": "other", "home:scan": "scan", "recent:open": "recent",
               "recent:compare": "recent", "recent:versions": "recent"}
 
@@ -155,12 +157,32 @@ class Worker(QThread):
         self.done.emit(outputs, errors)
 
 
+class HashJob(QThread):
+    """SHA-256 of a file, off the UI thread (files can be gigabytes)."""
+    done = pyqtSignal(str, str)              # file name, hex digest ("" if unreadable)
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self.path = path
+
+    def run(self):
+        digest = hashlib.sha256()
+        try:
+            with open(self.path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+        except OSError:
+            self.done.emit(self.path.name, "")
+            return
+        self.done.emit(self.path.name, digest.hexdigest())
+
+
 # ------------------------------------------------------------------ the hexagon
 ICON_DIR = HERE / "icons"
 ICONS = {   # Lucide icons in ./icons, white, 1.5 px stroke
     "home:pick": "folder-open", ">Recent": "history", "home:pdf": "file-text",
     "home:images": "image", "home:office": "briefcase", "home:media": "clapperboard",
-    "home:other": "file-archive", "home:scan": "scan-line",
+    "home:other": "file-archive", "home:scan": "scan-line", ">Scan": "scan-line", "virus:check": "shield",
     "recent:open": "folder-open", "recent:compare": "git-compare", "recent:versions": "history",
     ">Convert": "repeat", ">Pages": "layers", ">Security": "shield", ">Edit": "pencil",
     ">ImageEdit": "pencil", "merge": "combine", "split": "scissors", "extract": "file-output",
@@ -254,6 +276,12 @@ class Backend(QObject):
 
     @pyqtProperty(bool, notify=changed)
     def canGoBack(self): return bool(self.stack) or not self.home
+
+    @pyqtProperty(bool, notify=changed)
+    def atHome(self): return self.home and not self.stack
+
+    @pyqtProperty(str, constant=True)
+    def logoUrl(self): return QUrl.fromLocalFile(str(HERE / "fc-mark.png")).toString()
 
     @pyqtProperty(bool, notify=changed)
     def dropActive(self): return self._drop
@@ -596,6 +624,8 @@ class App(QObject):
         self.hexagon.present(pos, HOME, "FC", home=True)
 
     def home_group(self, group: str):
+        if group == "Scan":
+            return [("Virus check", "virus:check"), ("Paper scan", "home:scan")]
         if group == "Recent":
             return [("Open folder", "recent:open"), ("Compare", "recent:compare"),
                     ("Versions", "recent:versions")]
@@ -637,11 +667,39 @@ class App(QObject):
         self.open_for_files([page])                  # next: PDF, compress, protect...
         self.hexagon.flash("Scanned ✓")
 
+    def virus_check(self):
+        """Hash one file here, then open its VirusTotal page in the browser.
+        Only the hash leaves the computer, never the file."""
+        if self.hexagon.backend.home:
+            name, _ = QFileDialog.getOpenFileName(None, "FC: choose a file to check", "", "All files (*)")
+            target = Path(name) if name else None
+        else:
+            target = self.files[0] if self.files else None
+        if target is None or not target.is_file():
+            self.hexagon.flash("Cancelled", 2)
+            return
+        self.hexagon.flash("Checking…", 600)
+        job = HashJob(target)
+        job.done.connect(lambda n, h, j=job: self._virus_hash_ready(n, h, j))
+        self.workers.append(job)
+        job.start()
+
+    def _virus_hash_ready(self, name: str, digest: str, job):
+        self.workers.remove(job)
+        if not digest:
+            self.hexagon.flash("Could not read that file", 4)
+            return
+        QGuiApplication.clipboard().setText(digest)
+        QDesktopServices.openUrl(QUrl(f"https://www.virustotal.com/gui/file/{digest}"))
+        self.hexagon.flash("Opened VirusTotal. Hash copied", 6)
+
     def open_for_files(self, files, at_cursor: bool = False):
         options = file_tools.top_menu(files)[:SIDES]
         if not options:
             self.hexagon.flash("Can't use these together")
             return
+        if len(options) < SIDES:
+            options.append(("Virus check", "virus:check"))
         self.files = files
         kinds = {file_tools.kind_of(f) for f in files}
         kind = kinds.pop() if len(kinds) == 1 else None
@@ -677,6 +735,8 @@ class App(QObject):
                 self.hexagon.flash("No versions yet")
         elif key == "home:scan":
             self.scan()
+        elif key == "virus:check":
+            self.virus_check()
         elif key == "home:back":
             self.go_home()
         else:
@@ -782,9 +842,133 @@ class App(QObject):
         elif errors:
             self.hexagon.flash(f"Done ✓ ({len(errors)} failed)", 5)
         else:
-            self.hexagon.flash("Done ✓  Recent › Compare", 5)
+            self.hexagon.flash("Done ✓", 5)
         if self.hexagon.is_minimized() or not self.hexagon.is_active():
             self.hexagon.alert()                      # blink the taskbar button
+
+
+# ------------------------------------------------------------------ first-run setup
+def install_dir() -> Path:
+    if IS_WIN:
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Programs" / "FC"
+    return Path.home() / ".local" / "share" / "FC"
+
+
+def downloaded_binary() -> Path | None:
+    """The exe (or AppImage) the user started, if it is a release build that is not installed yet."""
+    if not getattr(sys, "frozen", False):
+        return None                                   # running from source
+    path = Path(os.environ.get("APPIMAGE") or (sys.executable if IS_WIN else "")) if (
+        IS_WIN or os.environ.get("APPIMAGE")) else None
+    if path is None or not path.is_file():
+        return None
+    return None if path.resolve().parent == install_dir().resolve() else path.resolve()
+
+
+def _desktop_folder() -> Path:
+    if IS_WIN:
+        import comtypes.client
+        return Path(comtypes.client.CreateObject("WScript.Shell").SpecialFolders("Desktop"))
+    try:
+        out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=5).stdout.strip()
+        if out:
+            return Path(out)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return Path.home() / "Desktop"
+
+
+def _make_shortcut(link: Path, target: Path):
+    """Windows .lnk through WScript.Shell; paths travel in environment variables, never in the script text."""
+    script = ("$l=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FC_LNK);"
+              "$l.TargetPath=$env:FC_TARGET;$l.WorkingDirectory=Split-Path $env:FC_TARGET;"
+              "$l.IconLocation=$env:FC_TARGET+',0';"
+              "$l.Description='FC: convert, compress and edit files';$l.Save()")
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command", script], check=True,
+                   timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                   env={**os.environ, "FC_LNK": str(link), "FC_TARGET": str(target)})
+
+
+def install_app(source: Path, desktop: bool, menu: bool) -> Path:
+    """Copy the download to a permanent place and add the shortcuts the user ticked."""
+    folder = install_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / ("FC.exe" if IS_WIN else "FC.AppImage")
+    shutil.copy2(source, dest)
+    if IS_WIN:
+        import comtypes.client
+        shell = comtypes.client.CreateObject("WScript.Shell")
+        places = ([Path(shell.SpecialFolders("Desktop"))] if desktop else []) + (
+            [Path(shell.SpecialFolders("Programs"))] if menu else [])
+        for place in places:
+            _make_shortcut(place / "FC.lnk", dest)
+    else:
+        dest.chmod(0o755)
+        icon_dir = Path.home() / ".local" / "share" / "icons" / "hicolor" / "512x512" / "apps"
+        icon_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(HERE / "fc.png", icon_dir / "FC.png")
+        entry = ("[Desktop Entry]\nType=Application\nName=FC\n"
+                 "Comment=Convert, compress, merge, split and protect files\n"
+                 f'Exec="{dest}"\nIcon=FC\nCategories=Utility;\nTerminal=false\nStartupWMClass=FC\n')
+        if menu:
+            apps = Path.home() / ".local" / "share" / "applications"
+            apps.mkdir(parents=True, exist_ok=True)
+            (apps / "FC.desktop").write_text(entry, encoding="utf-8")
+        if desktop:
+            link = _desktop_folder() / "FC.desktop"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.write_text(entry, encoding="utf-8")
+            link.chmod(0o755)
+            try:                                       # GNOME: let the icon launch without a warning
+                subprocess.run(["gio", "set", str(link), "metadata::trusted", "true"], timeout=5,
+                               capture_output=True)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return dest
+
+
+def offer_install() -> bool:
+    """First run of a downloaded copy: offer to install it with shortcuts, like an installer.
+    Returns True when it installed and started the installed copy, so this process should exit."""
+    source = downloaded_binary()
+    skip = LOG_DIR / "setup-declined"
+    if source is None or skip.exists() or os.environ.get("FC_NO_SETUP"):
+        return False
+    dialog = QDialog()
+    dialog.setWindowTitle("FC setup")
+    dialog.setWindowIcon(app_icon())
+    layout = QVBoxLayout(dialog)
+    label = QLabel("Install FC on this computer?\n\nIt is copied out of your Downloads folder so it "
+                   "stays when you clean that up. Nothing is sent anywhere.")
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    desktop = QCheckBox("Create a shortcut on the Desktop")
+    menu = QCheckBox("Add FC to the Start menu" if IS_WIN else "Add FC to the applications menu")
+    never = QCheckBox("Don't ask again, just run")
+    desktop.setChecked(True)
+    menu.setChecked(True)
+    for box in (desktop, menu, never):
+        layout.addWidget(box)
+    buttons = QDialogButtonBox()
+    install_btn = buttons.addButton("Install", QDialogButtonBox.ButtonRole.AcceptRole)
+    buttons.addButton("Just run", QDialogButtonBox.ButtonRole.RejectRole)
+    install_btn.setDefault(True)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        if never.isChecked():
+            skip.write_text("declined", encoding="utf-8")
+        return False
+    try:
+        dest = install_app(source, desktop.isChecked(), menu.isChecked())
+    except Exception:  # noqa: BLE001 - never block the app because setup failed
+        logging.exception("install failed")
+        return False
+    logging.info("installed to %s", dest)
+    subprocess.Popen([str(dest)], cwd=str(dest.parent), close_fds=True)
+    return True
 
 
 def single_instance(on_show) -> QLocalServer | None:
@@ -837,6 +1021,8 @@ def main():
             pass
     qapp = QApplication(sys.argv)
     qapp.setDesktopFileName("FC")          # Linux: matches FC.desktop, so the taskbar shows our icon
+    if offer_install():
+        return
     qapp.setWindowIcon(app_icon())
     holder: list = []
     server = single_instance(lambda: holder and holder[0].bring_front())

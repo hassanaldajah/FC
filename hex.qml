@@ -235,6 +235,18 @@ Item {
                 strokeWidth: 1.5
                 PathSvg { path: root.rounded(root.polyPoints(root.rFrame - 0.75), root.corner) }
             }
+            ShapePath {                                   // the logo's colours, running round the glass edge
+                strokeColor: "transparent"
+                fillRule: ShapePath.OddEvenFill
+                fillGradient: LinearGradient {
+                    x1: root.cx - root.rFrame; y1: root.cy + root.rFrame
+                    x2: root.cx + root.rFrame; y2: root.cy - root.rFrame
+                    GradientStop { position: 0.0; color: Qt.rgba(0.95, 0.35, 0.95, 0.85) }
+                    GradientStop { position: 0.5; color: Qt.rgba(0.35, 0.85, 1.0, 0.80) }
+                    GradientStop { position: 1.0; color: Qt.rgba(0.25, 0.9, 0.55, 0.85) }
+                }
+                PathSvg { path: root.rounded(root.polyPoints(root.rFrame), root.corner) + " " + root.rounded(root.polyPoints(root.rFrame - 2.2), root.corner) }
+            }
             ShapePath {                                   // soft inner line, gives the rim depth
                 fillColor: "transparent"
                 strokeColor: Qt.rgba(1, 1, 1, 0.14)
@@ -369,26 +381,32 @@ Item {
                     spacing: 3
                     opacity: Math.max(0.004, side.appear)   // never 0: the label halo is built during warm-up, not mid-animation
                     readonly property real rr: (root.rIn + root.rOut) / 2 - 4 + (1 - side.appear) * 12
-                    x: root.cx + rr * Math.cos(side.m) - width / 2
-                    y: root.cy + rr * Math.sin(side.m) - height / 2
+                    x: Math.round(root.cx + rr * Math.cos(side.m) - width / 2)     // whole pixels keep the edges crisp
+                    y: Math.round(root.cy + rr * Math.sin(side.m) - height / 2)
                     scale: 1 + 0.08 * side.pop
                     transformOrigin: Item.Center
-                    Rectangle {                     // glass badge, filled with colour on hover
+                    Rectangle {                     // crisp graphite tile, filled with colour on hover
                         anchors.horizontalCenter: parent.horizontalCenter
-                        width: 32; height: 32
-                        radius: 9
+                        width: 34; height: 34
+                        radius: 7
+                        antialiasing: true
                         gradient: Gradient {
-                            GradientStop { position: 0.0; color: root.mix(Qt.rgba(1, 1, 1, 0.22), Qt.lighter(side.tint, 1.18), side.pop) }
-                            GradientStop { position: 1.0; color: root.mix(Qt.rgba(1, 1, 1, 0.10), side.tint, side.pop) }
+                            GradientStop { position: 0.0; color: root.mix(Qt.rgba(0.24, 0.25, 0.29, 0.96), Qt.lighter(side.tint, 1.18), side.pop) }
+                            GradientStop { position: 1.0; color: root.mix(Qt.rgba(0.12, 0.13, 0.16, 0.96), side.tint, side.pop) }
                         }
-                        border.color: Qt.rgba(1, 1, 1, 0.35 + 0.25 * side.pop)
+                        border.color: Qt.rgba(1, 1, 1, 0.55 + 0.30 * side.pop)
                         border.width: 1
+                        Rectangle {                 // thin bright line along the top edge: a sharp bevel
+                            x: 7; y: 1; width: parent.width - 14; height: 1
+                            color: Qt.rgba(1, 1, 1, 0.45)
+                        }
                         Image {
                             anchors.centerIn: parent
                             source: side.opt.icon
-                            sourceSize.width: 18; sourceSize.height: 18
-                            width: 18; height: 18
+                            sourceSize.width: 48; sourceSize.height: 48      // drawn at 2x and scaled down: sharp lines
+                            width: 22; height: 22
                             smooth: true
+                            mipmap: true
                         }
                     }
                     Text {
@@ -525,19 +543,44 @@ Item {
                     PathSvg { path: root.rounded(root.inset(root.hubPoints(), -3), root.corner + 2) }
                 }
             }
-            Column {
+            // the FC letters from the logo (no tile), lifted off the hub by a soft shadow
+            Image {
+                id: badge
+                source: backend.logoUrl
+                width: Math.max(26, Math.min(46, 72 - words.height))     // smaller when the text under it is long
+                height: width * 539 / 533
                 x: root.cx - width / 2
-                y: root.cy - height / 2
-                width: 92
-                spacing: 1
+                // letters and the text under them are centred as one group in the hub
+                y: root.cy - (height + 4 + words.height) / 2
+                Behavior on y { enabled: !root.calm; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                smooth: true
+                mipmap: true
+                sourceSize.width: 240
+                scale: 1 + 0.025 * hub.breathe + 0.07 * hub.glow + (backend.dropActive ? 0.08 : 0)
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    shadowEnabled: true
+                    shadowColor: "#000000"
+                    shadowOpacity: 0.6
+                    shadowBlur: 0.9
+                    shadowVerticalOffset: 4
+                }
+            }
+            Column {
+                id: words
+                x: root.cx - width / 2
+                y: badge.y + badge.height + 4
+                width: 80
+                spacing: 0
                 Text {
                     width: parent.width
+                    visible: backend.dropActive || !backend.atHome
                     horizontalAlignment: Text.AlignHCenter
                     textFormat: Text.PlainText
                     wrapMode: Text.WordWrap
                     text: backend.dropActive ? "Release to convert" : backend.title
                     font.family: "Segoe UI Variable Display"
-                    font.pixelSize: backend.dropActive ? 12 : 13
+                    font.pixelSize: backend.dropActive ? 11 : 12
                     font.weight: Font.Bold
                     color: "white"
                     elide: Text.ElideRight
@@ -553,7 +596,7 @@ Item {
                     font.family: "Segoe UI"
                     font.pixelSize: 11
                     color: Qt.rgba(1, 1, 1, 0.86)
-                    maximumLineCount: 3
+                    maximumLineCount: 2
                     elide: Text.ElideRight
                 }
             }
