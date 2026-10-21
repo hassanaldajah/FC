@@ -411,13 +411,13 @@ Item {
                     }
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        width: 84
+                        width: 70
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.WordWrap
                         textFormat: Text.PlainText
                         text: side.opt.label + (side.opt.group ? " ›" : "")
                         font.family: "Segoe UI Variable Display"
-                        font.pixelSize: 12
+                        font.pixelSize: 10
                         font.weight: Font.DemiBold
                         color: "white"
                         // soft dark halo so labels read on bright wallpapers through the clear glass;
