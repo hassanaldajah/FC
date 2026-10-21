@@ -1,4 +1,4 @@
-"""PDF tools for HK File: organise, compress, protect, edit and convert.
+"""PDF tools for FC: organise, compress, protect, edit and convert.
 
 Every tool writes new files next to the source and returns their paths. The
 originals are never changed.

@@ -1,11 +1,11 @@
-"""HK File: a frosted-glass hexagon that converts, compresses, merges, splits
-and protects files.
+"""FC: a frosted-glass octagon that converts, compresses, merges, splits
+and protects files. Runs on Windows and Linux.
 
-Open it and the hexagon appears on screen (with its own taskbar button).
-Drop files on it, pick them from its "Choose files" side, or select files in
-File Explorer and press Ctrl+Alt+C (or hold Shift and scroll): the hexagon
-turns into the tools for those files. Results are saved next to the
-originals; nothing is overwritten and nothing leaves the computer.
+Open it and the octagon appears on screen (with its own taskbar button).
+Drop files on it, pick them from its "Choose files" side, or (on Windows) select
+files in File Explorer and press Ctrl+Alt+C or hold Shift and scroll: the octagon
+turns into the tools for those files. Results are saved where you choose;
+nothing is overwritten and nothing leaves the computer.
 """
 from __future__ import annotations
 
@@ -36,12 +36,16 @@ import file_tools
 import history
 import scanner
 
-APP_ID = "HassanAldajah.HKFile"
-INSTANCE_KEY = "HKFile-single-instance"
+IS_WIN = sys.platform == "win32"
+APP_ID = "HassanAldajah.FC"
+INSTANCE_KEY = "FC-single-instance"
 VERSION = "1.0.0"                     # keep in step with version_info.txt and the release tag
 HERE = Path(__file__).resolve().parent
-LOG_DIR = Path(os.environ.get("LOCALAPPDATA", str(HERE))) / "HK File"
-EXPLORER = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe")   # full path, never a look-alike
+if IS_WIN:
+    LOG_DIR = Path(os.environ.get("LOCALAPPDATA", str(HERE))) / "FC"
+    EXPLORER = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe")   # full path, never a look-alike
+else:
+    LOG_DIR = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "FC"
 
 SIDES = 8                            # panes in the octagon; must match sideCount in hex.qml
 HOME = [("Choose files", "home:pick"), ("Scan", "home:scan"), ("Recent", ">Recent"),
@@ -67,13 +71,17 @@ HOME_COLOR = {"home:pick": "pick", ">Recent": "recent", "home:pdf": "pdf", "home
 # ------------------------------------------------------------------ triggers
 class Triggers(QObject):
     """Ctrl+Alt+C, registered with Windows on its own thread (works in every
-    keyboard layout), and Shift + mouse wheel while File Explorer is in front."""
+    keyboard layout), and Shift + mouse wheel while File Explorer is in front.
+    On Linux: Ctrl+Alt+C through X11 (Wayland does not allow global hotkeys)."""
     fired = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         self._last = 0.0
         self.hotkey_ok = None
+        if not IS_WIN:
+            self._start_linux()
+            return
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
 
         from pynput import mouse
@@ -86,6 +94,17 @@ class Triggers(QObject):
         self._mouse = mouse.Listener(on_scroll=on_scroll)
         self._mouse.daemon = True
         self._mouse.start()
+
+    def _start_linux(self):
+        try:
+            from pynput import keyboard
+            self._keys = keyboard.GlobalHotKeys({"<ctrl>+<alt>+c": self.fire})
+            self._keys.daemon = True
+            self._keys.start()
+            self.hotkey_ok = True
+        except Exception:  # noqa: BLE001 - no X11 (Wayland, headless): the octagon still works
+            logging.warning("Ctrl+Alt+C is not available on this desktop session")
+            self.hotkey_ok = False
 
     def _hotkey_loop(self):
         user32 = ctypes.windll.user32
@@ -120,8 +139,9 @@ class Worker(QThread):
         self.jobs = jobs
 
     def run(self):
-        import comtypes
-        comtypes.CoInitialize()
+        if IS_WIN:
+            import comtypes
+            comtypes.CoInitialize()
         outputs, errors = [], []
         try:
             for name, job in self.jobs:
@@ -130,7 +150,8 @@ class Worker(QThread):
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"{name}: {exc}")
         finally:
-            comtypes.CoUninitialize()
+            if IS_WIN:
+                comtypes.CoUninitialize()
         self.done.emit(outputs, errors)
 
 
@@ -165,6 +186,8 @@ def icon_for(key: str) -> str:
 
 def reduced_motion() -> bool:
     """Windows 'Show animations in Windows' switched off = keep motion minimal."""
+    if not IS_WIN:
+        return False
     try:
         on = ctypes.c_int(1)
         ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(on), 0)  # SPI_GETCLIENTAREAANIMATION
@@ -174,8 +197,8 @@ def reduced_motion() -> bool:
 
 
 def app_icon() -> QIcon:
-    ico = HERE / "hkfile.ico"
-    return QIcon(str(ico)) if ico.exists() else QIcon()
+    icon = HERE / ("fc.ico" if IS_WIN else "fc.png")
+    return QIcon(str(icon)) if icon.exists() else QIcon()
 
 
 class ShotProvider(QQuickImageProvider):
@@ -361,7 +384,7 @@ class HexView(QObject):
         self.was_minimized = False
 
         self.view = QQuickView()
-        self.view.setTitle("HK File")
+        self.view.setTitle("FC")
         self.view.setIcon(app_icon())
         self.view.setFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.view.setColor(QColor(0, 0, 0, 0))
@@ -394,6 +417,8 @@ class HexView(QObject):
 
     def _allow_taskbar_minimize(self):
         """Frameless windows ignore taskbar clicks; give it a minimize box."""
+        if not IS_WIN:
+            return
         GWL_STYLE, WS_MINIMIZEBOX, WS_SYSMENU = -16, 0x00020000, 0x00080000
         user32 = ctypes.windll.user32
         user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
@@ -429,9 +454,11 @@ class HexView(QObject):
         excluded from screen capture (Windows 10 2004+), so it never photographs itself."""
         centre = self.view.geometry().center()
         screen = QGuiApplication.screenAt(centre) or QGuiApplication.primaryScreen()
-        hwnd = wintypes.HWND(int(self.view.winId()))
-        WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
-        excluded = bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+        excluded = False
+        if IS_WIN:
+            hwnd = wintypes.HWND(int(self.view.winId()))
+            WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
+            excluded = bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
         try:
             img = screen.grabWindow(0).toImage()
         finally:
@@ -456,7 +483,7 @@ class HexView(QObject):
                                for i in range(1, 5) for j in range(1, 5)):
             logging.warning("desktop snapshot is empty (%sx%s, dpr %s): the glass will look flat",
                             img.width(), img.height(), screen.devicePixelRatio())
-        if os.environ.get("HKFILE_DEBUG_SHOT"):           # troubleshooting: keep what the glass sees
+        if os.environ.get("FC_DEBUG_SHOT"):           # troubleshooting: keep what the glass sees
             img.save(str(LOG_DIR / "last-snapshot.png"))
         # let the GPU upload and blur the new snapshot while we are still
         # invisible; the animation starts only once that work is done
@@ -522,6 +549,26 @@ class HexView(QObject):
         self.view.alert(3000)
 
 
+# ------------------------------------------------------------------ opening things
+def show_in_folder(path: Path):
+    """Open the folder holding path, with the file selected where the file manager can."""
+    if IS_WIN:
+        subprocess.Popen([EXPLORER, "/select,", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(Path(path).parent)])
+
+
+def open_folder(folder: Path):
+    subprocess.Popen([EXPLORER, str(folder)] if IS_WIN else ["xdg-open", str(folder)])
+
+
+def open_file(path: Path):
+    if IS_WIN:
+        os.startfile(path)                       # opens in the photo viewer
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
 # ------------------------------------------------------------------ app
 class App(QObject):
     def __init__(self, qapp: QApplication):
@@ -546,7 +593,7 @@ class App(QObject):
             screen = QApplication.primaryScreen().availableGeometry()
             pos = screen.center()
         self.hexagon.set_resolver(self.home_group)
-        self.hexagon.present(pos, HOME, "HK File", home=True)
+        self.hexagon.present(pos, HOME, "FC", home=True)
 
     def home_group(self, group: str):
         if group == "Recent":
@@ -561,14 +608,15 @@ class App(QObject):
         files = explorer.selected_files()
         if not files:
             self.hexagon.present(None if self.hexagon.is_visible() and not self.hexagon.is_minimized()
-                                 else QCursor.pos(), HOME, "HK File", home=True)
-            self.hexagon.flash("Select files first")
+                                 else QCursor.pos(), HOME, "FC", home=True)
+            if IS_WIN:                  # Linux file managers cannot tell us the selection
+                self.hexagon.flash("Select files first")
             return
         self.open_for_files(files, at_cursor=True)
 
     def scan(self):
         """Scan a page, save it where the user wants, then show the image tools for it."""
-        target = QFileDialog.getExistingDirectory(None, "HK File: where to save the scan?",
+        target = QFileDialog.getExistingDirectory(None, "FC: where to save the scan?",
                                                   str(Path.home() / "Desktop"))
         if not target:
             self.hexagon.flash("Cancelled", 2)
@@ -605,26 +653,26 @@ class App(QObject):
 
     def on_choice(self, key: str):
         if key in PICK_FILTERS:
-            names, _ = QFileDialog.getOpenFileNames(None, "Choose files for HK File", "",
+            names, _ = QFileDialog.getOpenFileNames(None, "Choose files for FC", "",
                                                     PICK_FILTERS[key])
             if names:
                 self.open_for_files([Path(n) for n in names])
         elif key == "recent:open":
             if self.results and Path(self.results[-1]).exists():
-                subprocess.Popen([EXPLORER, "/select,", str(self.results[-1])])
+                show_in_folder(self.results[-1])
             else:
                 self.hexagon.flash("No results yet")
         elif key == "recent:compare":
             before = next((p for p in self.last_sources if p.exists()), None)
             after = next((p for p in self.last_outputs if Path(p).exists()), None)
             if before and after:
-                os.startfile(history.compare(before, Path(after)))   # opens in the photo viewer
+                open_file(history.compare(before, Path(after)))
             else:
                 self.hexagon.flash("Run a tool first")
         elif key == "recent:versions":
             src = next((p for p in self.last_sources if history.versions_dir(p).exists()), None)
             if src:
-                subprocess.Popen([EXPLORER, str(history.versions_dir(src))])
+                open_folder(history.versions_dir(src))
             else:
                 self.hexagon.flash("No versions yet")
         elif key == "home:scan":
@@ -637,15 +685,15 @@ class App(QObject):
     def _ask(self, needs: str) -> str | None:
         """Password, watermark text, page numbers or minutes; None when cancelled."""
         if needs == "password":
-            text, ok = QInputDialog.getText(None, "HK File", "Password:", QLineEdit.EchoMode.Password)
+            text, ok = QInputDialog.getText(None, "FC", "Password:", QLineEdit.EchoMode.Password)
         elif needs == "text":
-            text, ok = QInputDialog.getText(None, "HK File", "Watermark text:",
+            text, ok = QInputDialog.getText(None, "FC", "Watermark text:",
                                             QLineEdit.EchoMode.Normal, "CONFIDENTIAL")
         elif needs == "minutes":
-            text, ok = QInputDialog.getText(None, "HK File", "Length of each part in minutes:",
+            text, ok = QInputDialog.getText(None, "FC", "Length of each part in minutes:",
                                             QLineEdit.EchoMode.Normal, "5")
         else:
-            text, ok = QInputDialog.getText(None, "HK File", "Pages (e.g. 1-3, 5, 8-):")
+            text, ok = QInputDialog.getText(None, "FC", "Pages (e.g. 1-3, 5, 8-):")
         return text if ok and text.strip() else None
 
     def run_tool(self, key: str):
@@ -667,7 +715,7 @@ class App(QObject):
             title = label
         # last step before running: where should the results go?
         start = str(files[0].parent) if files else str(Path.home() / "Desktop")
-        target = QFileDialog.getExistingDirectory(None, f"HK File: where to save ({title})?", start)
+        target = QFileDialog.getExistingDirectory(None, f"FC: where to save ({title})?", start)
         if not target:
             self.hexagon.flash("Cancelled", 2)
             return
@@ -697,6 +745,8 @@ class App(QObject):
     @staticmethod
     def _tell_explorer(path: Path):
         """Tell Windows a file was created, so Explorer draws its real icon at once."""
+        if not IS_WIN:
+            return
         try:
             SHCNE_CREATE, SHCNE_MKDIR, SHCNE_UPDATEDIR, SHCNF_PATHW = 0x2, 0x8, 0x1000, 0x5
             shell32 = ctypes.windll.shell32
@@ -738,7 +788,7 @@ class App(QObject):
 
 
 def single_instance(on_show) -> QLocalServer | None:
-    """If HK File already runs, bring its hexagon forward and return None."""
+    """If FC already runs, bring its hexagon forward and return None."""
     sock = QLocalSocket()
     sock.connectToServer(INSTANCE_KEY)
     if sock.waitForConnected(300):
@@ -749,7 +799,7 @@ def single_instance(on_show) -> QLocalServer | None:
         return None
     QLocalServer.removeServer(INSTANCE_KEY)
     server = QLocalServer()
-    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)   # only this Windows user
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)   # only this user
     server.listen(INSTANCE_KEY)
 
     def on_connect():
@@ -760,17 +810,33 @@ def single_instance(on_show) -> QLocalServer | None:
     return server
 
 
+def selftest() -> int:
+    """Release check (fc --selftest): every bundled library loads. Run by the build workflow."""
+    import importlib
+    for name in ("PyQt6.QtQuick", "PyQt6.QtQml", "PyQt6.QtNetwork", "PIL.Image", "pymupdf",
+                 "pyzipper", "pptx", "pdf2docx", "imageio_ffmpeg"):
+        importlib.import_module(name)
+    import imageio_ffmpeg
+    ok = (HERE / "hex.qml").exists() and Path(imageio_ffmpeg.get_ffmpeg_exe()).exists()
+    print("FC", VERSION, "selftest", "ok" if ok else "FAILED")
+    return 0 if ok else 1
+
+
 def main():
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     os.chdir(HERE)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=LOG_DIR / "hkfile.log", level=logging.INFO,
+    logging.basicConfig(filename=LOG_DIR / "fc.log", level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     sys.excepthook = lambda t, v, tb: logging.critical("crash", exc_info=(t, v, tb))
-    try:  # our own taskbar button and icon instead of Python's
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
-    except Exception:  # noqa: BLE001
-        pass
+    if IS_WIN:
+        try:  # our own taskbar button and icon instead of Python's
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        except Exception:  # noqa: BLE001
+            pass
     qapp = QApplication(sys.argv)
+    qapp.setDesktopFileName("FC")          # Linux: matches FC.desktop, so the taskbar shows our icon
     qapp.setWindowIcon(app_icon())
     holder: list = []
     server = single_instance(lambda: holder and holder[0].bring_front())
@@ -778,7 +844,7 @@ def main():
         return
     app = App(qapp)
     holder.append(app)
-    logging.info("HK File started")
+    logging.info("FC started")
     sys.exit(qapp.exec())
 
 

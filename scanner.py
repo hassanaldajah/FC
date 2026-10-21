@@ -1,10 +1,14 @@
-"""Scan a page with the scanner Windows already knows about (WIA, built in, free).
+"""Scan a page with the scanner the system already knows about: WIA on Windows
+(built in, free), SANE's scanimage on Linux (package "sane-utils").
 
 Windows shows its own scan dialog (paper size, colour, preview); we only save the
-result as a PNG so the rest of HK File can turn it into a PDF, compress it, etc.
+result as a PNG so the rest of FC can turn it into a PDF, compress it, etc.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -22,8 +26,28 @@ class NoScanner(Exception):
     """No scanner is connected, or it is switched off."""
 
 
+def _scan_sane(folder: Path) -> Path:
+    exe = shutil.which("scanimage")
+    if exe is None:
+        raise NoScanner("install sane-utils to scan on Linux")
+    out = _free_name(Path(folder) / f"Scan {time.strftime('%Y-%m-%d %H%M%S')}.png", "png", "")
+    try:
+        with open(out, "wb") as f:
+            done = subprocess.run([exe, "--format=png", "--resolution=300", "--mode=Color"],
+                                  stdout=f, stderr=subprocess.PIPE, timeout=300)
+    except subprocess.TimeoutExpired as e:
+        out.unlink(missing_ok=True)
+        raise NoScanner from e
+    if done.returncode != 0 or out.stat().st_size == 0:
+        out.unlink(missing_ok=True)
+        raise NoScanner(done.stderr.decode(errors="replace").strip()[:200])
+    return out
+
+
 def scan_to(folder: Path) -> Path | None:
     """Scan one page into folder. Returns the PNG, or None if the user cancelled."""
+    if sys.platform != "win32":
+        return _scan_sane(folder)
     import comtypes
     import comtypes.client
 

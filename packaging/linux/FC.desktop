@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=FC
+Comment=Convert, compress, merge, split and protect files
+Exec=FC
+Icon=FC
+Categories=Utility;
+Terminal=false
+StartupWMClass=FC

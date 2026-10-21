@@ -1,6 +1,6 @@
-"""Before / after comparison and saved versions for HK File.
+"""Before / after comparison and saved versions for FC.
 
-Versions live in a hidden ".hkfile-versions" folder next to the original:
+Versions live in a hidden ".fc-versions" folder next to the original:
 v0 is the original as it was, then v1, v2, ... one per result.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from converters import kind_of
 
-VERSIONS = ".hkfile-versions"
+VERSIONS = ".fc-versions"
 
 
 # ---------------------------------------------------------------- versions
@@ -175,13 +175,13 @@ def compare(before: Path, after: Path) -> Path:
     draw.text((W / 2, H - 38), verdict, font=big, anchor="mm",
               fill=(120, 230, 160) if change < 0 else (255, 205, 120) if change > 0 else (220, 220, 230))
     tmp = Path(tempfile.gettempdir())
-    for old in tmp.glob("hkfile-compare-*.png"):          # tidy up cards older than a day
+    for old in tmp.glob("fc-compare-*.png"):          # tidy up cards older than a day
         try:
             if time.time() - old.stat().st_mtime > 86_400:
                 old.unlink()
         except OSError:
             pass
-    fd, name = tempfile.mkstemp(prefix="hkfile-compare-", suffix=".png")   # unique, private
+    fd, name = tempfile.mkstemp(prefix="fc-compare-", suffix=".png")   # unique, private
     with os.fdopen(fd, "wb") as f:
         card.save(f, "PNG")
     return Path(name)

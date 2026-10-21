@@ -1,13 +1,14 @@
 """Compress, merge, split and protect for every kind of file.
 
-Word, Excel and PowerPoint go through Microsoft Office (macros off), media
-through FFmpeg, images through Pillow, and anything else into ZIP files.
+Word, Excel and PowerPoint go through Microsoft Office (macros off) on Windows
+and LibreOffice (convert, split Word) on Linux, media through FFmpeg, images through Pillow, and anything else into ZIP files.
 Every tool writes new files next to the source and returns their paths.
 """
 from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -501,6 +502,10 @@ def top_menu(paths: list[Path]) -> list[tuple[str, str]]:
     if kind == "pdf":
         return pdf_tools.pdf_menu(many)
     if kind in OFFICE_KEYS:
+        if sys.platform != "win32":     # LibreOffice can convert and split Word; the rest needs MS Office
+            return ([("Convert", ">Convert"), ("Compress", "office_compress")]
+                    + ([("Split", "word_split")] if kind == "word" and not many else [])
+                    + [("Lock in ZIP", "zip_lock"), ("Zip", "zip")])
         merge_k, split_k, protect_k = OFFICE_KEYS[kind]
         sixth = {"word": ("Watermark", "word_watermark"),
                  "slides": ("Watermark", "ppt_watermark")}.get(kind, ("Zip", "zip"))

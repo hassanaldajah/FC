@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 import warnings
 from pathlib import Path
 
-user32 = ctypes.windll.user32
+IS_WIN = sys.platform == "win32"
+user32 = ctypes.windll.user32 if IS_WIN else None      # Linux has no File Explorer to ask
 
 
 def _class_name(hwnd: int) -> str:
@@ -15,11 +17,15 @@ def _class_name(hwnd: int) -> str:
 
 
 def foreground_is_explorer() -> bool:
+    if not IS_WIN:
+        return False
     return _class_name(user32.GetForegroundWindow()) in ("CabinetWClass", "ExploreWClass")
 
 
 def selected_files() -> list[Path]:
     """Selected files (not folders) of the active Explorer window, or []."""
+    if not IS_WIN:
+        return []
     hwnd = user32.GetForegroundWindow()
     if _class_name(hwnd) not in ("CabinetWClass", "ExploreWClass"):
         return []

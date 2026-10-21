@@ -1,4 +1,4 @@
-// HK File: the hexagon, drawn on the GPU with Qt Quick.
+// FC: the hexagon, drawn on the GPU with Qt Quick.
 // True liquid glass: the desktop behind is blurred and saturated, a light
 // translucent fill sits on top, every pane has a bright top-left edge and a
 // soft dark bottom-right edge, and one large shadow floats the cluster.

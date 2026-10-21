@@ -1,30 +1,44 @@
-<img src="docs/logo.svg" width="96" alt="HK File logo">
+<img src="docs/logo.png" width="128" alt="FC logo">
 
-# HK File
+# FC
 
-![HK File octagon menu](docs/preview.png)
+![FC octagon menu](docs/preview.png)
 
-A free Windows tool that converts, compresses and edits files from a glass octagon on your screen.
-Drop files on it, pick **Choose files**, or select files in File Explorer and press **Ctrl+Alt+C**
-(or hold **Shift** and scroll): the octagon turns into the tools for those files.
+A free tool for **Windows and Linux** that converts, compresses and edits files from a glass octagon
+on your screen. Drop files on it, pick **Choose files**, or (Windows) select files in File Explorer
+and press **Ctrl+Alt+C** (or hold **Shift** and scroll): the octagon turns into the tools for those files.
 Before a tool runs it asks where to save the result. Your original file is never overwritten.
 
-**HK File never connects to the internet.** Every tool runs on your own computer.
+**FC never connects to the internet.** Every tool runs on your own computer.
 
 ## Download and verify
 1. Open the [latest release](https://github.com/hassanaldajah/HK-File/releases/latest) and download
-   `HKFile-<version>-win64.exe` and its `.sha256` file.
-2. Check the checksum in PowerShell. The two values must be the same:
+   `FC-<version>-win64.exe` (Windows) or `FC-<version>-x86_64.AppImage` (Linux) and its `.sha256` file.
+2. Check the checksum (Windows, PowerShell; on Linux use `sha256sum -c FC-<version>-x86_64.AppImage.sha256`). The two values must be the same:
    ```powershell
-   (Get-FileHash .\HKFile-1.0.0-win64.exe -Algorithm SHA256).Hash.ToLower()
-   Get-Content .\HKFile-1.0.0-win64.exe.sha256
+   (Get-FileHash .\FC-1.0.0-win64.exe -Algorithm SHA256).Hash.ToLower()
+   Get-Content .\FC-1.0.0-win64.exe.sha256
    ```
 3. Optional, stronger: prove the exe was built by this repository's GitHub Actions from the
    tagged source code (needs the free [GitHub CLI](https://cli.github.com/)):
    ```powershell
-   gh attestation verify .\HKFile-1.0.0-win64.exe --repo hassanaldajah/HK-File
+   gh attestation verify .\FC-1.0.0-win64.exe --repo hassanaldajah/HK-File
    ```
-4. VirusTotal scan of v1.0.0: _link added after the release is published_.
+4. VirusTotal scan of the v1.0.0 exe: [1 of 67 engines](https://www.virustotal.com/gui/file/0c35db9f92e9096fc442d297c4afd21783b88092766820f0e8e92273e630ffa9)
+   flags it (Bkav Pro, a generic "W32.Malware" guess); the other 66 find nothing. Unsigned programs
+   packed with PyInstaller often get a lone false positive like this. Steps 2 and 3 prove the file
+   is exactly what this repository's source builds.
+
+### Linux
+```sh
+chmod +x FC-1.0.0-x86_64.AppImage && ./FC-1.0.0-x86_64.AppImage
+```
+- Needs an X11 session or XWayland, and on Ubuntu/Debian `sudo apt install libxcb-cursor0`.
+- Ctrl+Alt+C works on X11 only. Under Wayland the glass shows no desktop blur and the shortcut is unavailable.
+- Word, Excel and PowerPoint conversions (and splitting Word) use **LibreOffice** if installed
+  (`sudo apt install libreoffice`); merging, protecting and watermarking Office files need Windows with
+  Microsoft Office, so those sides are hidden on Linux. Scanning uses `scanimage` (`sane-utils`).
+- Not yet tested on a real Linux desktop: please report problems as GitHub issues.
 
 ### "Windows protected your PC"
 The exe is not code-signed (a signing certificate costs money every year, and this project is free).
@@ -45,7 +59,7 @@ If the checksum above matches, click **More info → Run anyway**. You only need
 - **Scan** uses the scanner Windows already knows (WIA): Windows' own scan window opens, the page is
   saved as a PNG, and the octagon offers the image tools (for example Convert › PDF).
 - **Recent › Compare** shows a before / after card with both sizes and the change in percent.
-- **Recent › Versions** opens the hidden `.hkfile-versions` folder: `v0` is the original, then one
+- **Recent › Versions** opens the hidden `.fc-versions` folder: `v0` is the original, then one
   version per result, so you can always go back.
 
 Keys: arrows or the mouse wheel move around the sides, Enter picks, 1-8 pick directly, Tab also
@@ -61,17 +75,19 @@ With Windows' "Animation effects" setting off, the octagon appears without motio
 ```powershell
 py -m venv .venv
 .venv\Scripts\python -m pip install --require-hashes -r requirements.txt
-.venv\Scripts\pythonw hkfile.py
+.venv\Scripts\pythonw fc.py
 ```
-Office tools need Microsoft Office installed. `requirements.in` lists the direct dependencies;
+Linux: `python3 -m venv .venv && .venv/bin/python -m pip install --require-hashes -r requirements.txt && .venv/bin/python fc.py`.
+On Windows the Office tools need Microsoft Office installed. `requirements.in` lists the direct dependencies;
 `requirements.txt` pins every package with its hashes (rebuild it with `tools\lock.py`).
 
-## Build the exe yourself
+## Build it yourself
 ```powershell
 .venv\Scripts\python -m pip install --require-hashes -r requirements-build.txt
-.venv\Scripts\python -m PyInstaller --clean --noconfirm hkfile.spec
+.venv\Scripts\python -m PyInstaller --clean --noconfirm fc.spec
 ```
-The result is `dist\HK File.exe`. Releases are built the same way by
+The result is `dist\FC.exe` (on Linux, the folder `dist/FC`, which `packaging/linux/build-appimage.sh`
+wraps into an AppImage). Releases are built the same way by
 [.github/workflows/release.yml](.github/workflows/release.yml) when a `v*` tag is pushed.
 
 Icons: [Lucide](https://lucide.dev) (ISC licence, see `icons/LICENSE-lucide.txt`).

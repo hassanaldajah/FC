@@ -1,12 +1,13 @@
-# Direct dependencies of HK File. After editing, rebuild the hashed lock (requirements.txt):
+# Direct dependencies of FC (Windows and Linux). After editing, rebuild the hashed lock (requirements.txt):
 #   py -m venv lockenv && lockenv\Scripts\python -m pip install -r requirements.in
 #   py tools\lock.py lockenv\Scripts\python.exe requirements.txt
 PyQt6==6.11.0
 pynput==1.8.2
-comtypes==1.4.17
+comtypes==1.4.17; sys_platform == "win32"
 Pillow>=13.0.0
 PyMuPDF==1.28.2
 imageio-ffmpeg==0.6.0
 pyzipper==0.4.0
 python-pptx==1.0.2
 pdf2docx==0.5.13
+python-xlib==0.33; sys_platform == "linux"        # pynput on X11

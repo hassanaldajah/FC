@@ -1,12 +1,17 @@
-"""File conversions used by HK File.
+"""File conversions used by FC.
 
 Every converter takes a source path and a target extension and returns the
 path of the file it wrote, next to the source and never over an existing file.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
+
+IS_WIN = sys.platform == "win32"
 
 IMAGE_IN = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".ico"}
 AUDIO_IN = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus"}
@@ -121,13 +126,47 @@ def _pdf(src: Path, ext: str) -> Path:
         doc.close()
 
 
-# ---------------------------------------------------------------- office (needs MS Office)
+# ---------------------------------------------------------------- office (MS Office, or LibreOffice on Linux)
 WORD_FORMATS = {"pdf": 17, "docx": 16, "txt": 2, "rtf": 6}
 PPT_FORMATS = {"pdf": 32, "pptx": 24, "png": 18}
 XL_FORMATS = {"xlsx": 51, "csv": 6}
 
 
+def _soffice(src: Path, ext: str) -> Path:
+    """Linux: convert with LibreOffice, headless, in a throw-away profile folder."""
+    exe = shutil.which("soffice") or shutil.which("libreoffice")
+    if exe is None:
+        raise ValueError("install LibreOffice to convert Office files on Linux")
+    with tempfile.TemporaryDirectory(prefix="fc-office-") as tmp:
+        tmp = Path(tmp)
+        want = "pdf" if ext == "png" else ext                  # slide pictures come from the PDF
+        subprocess.run([exe, f"-env:UserInstallation={(tmp / 'profile').as_uri()}", "--headless",
+                        "--convert-to", "txt:Text" if want == "txt" else want,
+                        "--outdir", str(tmp), str(src)],
+                       check=True, timeout=900, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        made = tmp / f"{src.stem}.{want}"
+        if not made.exists():
+            raise ValueError("LibreOffice could not convert this file")
+        if ext == "png":
+            import pymupdf
+            out = src.with_name(f"{src.stem} (png)")
+            n = 2
+            while out.exists():
+                out = src.with_name(f"{src.stem} (png) ({n})")
+                n += 1
+            out.mkdir()
+            with pymupdf.open(made) as doc:
+                for i, page in enumerate(doc, 1):
+                    page.get_pixmap(dpi=150).save(out / f"{src.stem}-{i:03d}.png")
+            return out
+        out = _free_name(src, ext)
+        shutil.move(str(made), str(out))
+        return out
+
+
 def _office_word(src: Path, ext: str) -> Path:
+    if not IS_WIN:
+        return _soffice(src, ext)
     import comtypes.client
 
     out = _free_name(src, ext)
@@ -148,6 +187,8 @@ def _office_word(src: Path, ext: str) -> Path:
 
 
 def _office_slides(src: Path, ext: str) -> Path:
+    if not IS_WIN:
+        return _soffice(src, ext)
     import comtypes.client
 
     out = _free_name(src, ext) if ext != "png" else src.with_name(f"{src.stem} (png)")
@@ -165,6 +206,8 @@ def _office_slides(src: Path, ext: str) -> Path:
 
 
 def _office_sheet(src: Path, ext: str) -> Path:
+    if not IS_WIN:
+        return _soffice(src, ext)
     import comtypes.client
 
     out = _free_name(src, ext)

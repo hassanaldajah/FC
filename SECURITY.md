@@ -12,7 +12,7 @@ Please **do not** open a public issue. Use GitHub's private reporting instead:
 Include what you did, what happened, and a sample file if one is needed to show it.
 This is a one-person project, so replies are best effort, usually within a week.
 
-## What HK File does and does not do
+## What FC does and does not do
 - It never connects to the internet. Every tool runs on your own computer.
 - It opens Office files with macros turned off, and refuses files that unpack to more than 2 GB
   (zip bombs) or inputs larger than 4 GB.
