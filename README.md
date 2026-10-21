@@ -18,13 +18,13 @@ Before a tool runs it asks where to save the result. Your original file is never
    `FC-<version>-win64.exe` (Windows) or `FC-<version>-x86_64.AppImage` (Linux) and its `.sha256` file.
 2. Check the checksum (Windows, PowerShell; on Linux use `sha256sum -c FC-<version>-x86_64.AppImage.sha256`). The two values must be the same:
    ```powershell
-   (Get-FileHash .\FC-1.1.0-win64.exe -Algorithm SHA256).Hash.ToLower()
-   Get-Content .\FC-1.1.0-win64.exe.sha256
+   (Get-FileHash .\FC-1.1.1-win64.exe -Algorithm SHA256).Hash.ToLower()
+   Get-Content .\FC-1.1.1-win64.exe.sha256
    ```
 3. Optional, stronger: prove the exe was built by this repository's GitHub Actions from the
    tagged source code (needs the free [GitHub CLI](https://cli.github.com/)):
    ```powershell
-   gh attestation verify .\FC-1.1.0-win64.exe --repo hassanaldajah/HK-File
+   gh attestation verify .\FC-1.1.1-win64.exe --repo hassanaldajah/HK-File
    ```
 4. VirusTotal scan of the v1.0.0 exe: [1 of 67 engines](https://www.virustotal.com/gui/file/0c35db9f92e9096fc442d297c4afd21783b88092766820f0e8e92273e630ffa9)
    flags it (Bkav Pro, a generic "W32.Malware" guess); the other 66 find nothing. Unsigned programs
@@ -33,7 +33,7 @@ Before a tool runs it asks where to save the result. Your original file is never
 
 ### Linux
 ```sh
-chmod +x FC-1.1.0-x86_64.AppImage && ./FC-1.1.0-x86_64.AppImage
+chmod +x FC-1.1.1-x86_64.AppImage && ./FC-1.1.1-x86_64.AppImage
 ```
 - Needs an X11 session or XWayland, and on Ubuntu/Debian `sudo apt install libxcb-cursor0`.
 - Ctrl+Alt+C works on X11 only. Under Wayland the glass shows no desktop blur and the shortcut is unavailable.

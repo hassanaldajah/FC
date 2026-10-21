@@ -41,7 +41,7 @@ import scanner
 IS_WIN = sys.platform == "win32"
 APP_ID = "HassanAldajah.FC"
 INSTANCE_KEY = "FC-single-instance"
-VERSION = "1.1.0"                     # keep in step with version_info.txt and the release tag
+VERSION = "1.1.1"                     # keep in step with version_info.txt and the release tag
 HERE = Path(__file__).resolve().parent
 if IS_WIN:
     LOG_DIR = Path(os.environ.get("LOCALAPPDATA", str(HERE))) / "FC"
