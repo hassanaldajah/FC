@@ -26,10 +26,9 @@ Before a tool runs it asks where to save the result. Your original file is never
    ```powershell
    gh attestation verify .\FC-1.1.1-win64.exe --repo hassanaldajah/HK-File
    ```
-4. VirusTotal scan of the v1.0.0 exe: [1 of 67 engines](https://www.virustotal.com/gui/file/0c35db9f92e9096fc442d297c4afd21783b88092766820f0e8e92273e630ffa9)
-   flags it (Bkav Pro, a generic "W32.Malware" guess); the other 66 find nothing. Unsigned programs
-   packed with PyInstaller often get a lone false positive like this. Steps 2 and 3 prove the file
-   is exactly what this repository's source builds.
+4. Optional: scan the download on [VirusTotal](https://www.virustotal.com) (use **Scan › Virus check** in FC,
+   or upload it there). Unsigned programs packed with PyInstaller sometimes get a lone false positive
+   from one engine; steps 2 and 3 prove the file is exactly what this repository's source builds.
 
 ### Linux
 ```sh
