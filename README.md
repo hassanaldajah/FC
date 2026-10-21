@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" width="96" alt="HK File logo">
+
 # HK File
 
 ![HK File octagon menu](docs/preview.png)
