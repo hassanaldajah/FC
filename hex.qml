@@ -42,6 +42,23 @@ Item {
     function mix(a, b, t) {         // blend two colours, alpha included
         return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t)
     }
+    // magenta -> violet -> cyan -> green, the colours of the FC logo, spread round the eight panes
+    function logoColor(k) {
+        var stops = [Qt.rgba(0.93, 0.30, 0.90, 1), Qt.rgba(0.60, 0.42, 1.0, 1), Qt.rgba(0.28, 0.80, 1.0, 1), Qt.rgba(0.20, 0.86, 0.52, 1)]
+        var t = Math.max(0, Math.min(1, k / (sideCount - 1))) * (stops.length - 1)
+        var i = Math.min(stops.length - 2, Math.floor(t))
+        return mix(stops[i], stops[i + 1], t - i)
+    }
+    // the same colours as a loop (t wraps at 1): the glass edge cycles through them
+    property real rimPhase: 0
+    NumberAnimation on rimPhase { from: 0; to: 1; duration: 9000; loops: Animation.Infinite; running: !root.calm }
+    function ringColor(t) {
+        var c = [Qt.rgba(0.93, 0.30, 0.90, 1), Qt.rgba(0.60, 0.42, 1.0, 1), Qt.rgba(0.28, 0.80, 1.0, 1),
+                 Qt.rgba(0.20, 0.86, 0.52, 1), Qt.rgba(0.28, 0.80, 1.0, 1), Qt.rgba(0.60, 0.42, 1.0, 1)]
+        var u = ((t % 1) + 1) % 1 * c.length
+        var i = Math.floor(u)
+        return mix(c[i % c.length], c[(i + 1) % c.length], u - i)
+    }
     function polyPoints(r) { var p = []; for (var k = 0; k < sideCount; k++) p.push(cornerPt(k, r)); return p }
     // move every edge of a convex polygon inwards by d (exact, so gaps are equal)
     function inset(pts, d) {
@@ -241,11 +258,15 @@ Item {
                 fillGradient: LinearGradient {
                     x1: root.cx - root.rFrame; y1: root.cy + root.rFrame
                     x2: root.cx + root.rFrame; y2: root.cy - root.rFrame
-                    GradientStop { position: 0.0; color: Qt.rgba(0.95, 0.35, 0.95, 0.85) }
-                    GradientStop { position: 0.5; color: Qt.rgba(0.35, 0.85, 1.0, 0.80) }
-                    GradientStop { position: 1.0; color: Qt.rgba(0.25, 0.9, 0.55, 0.85) }
+                    GradientStop { position: 0.00; color: root.ringColor(root.rimPhase) }
+                    GradientStop { position: 0.17; color: root.ringColor(root.rimPhase + 0.17) }
+                    GradientStop { position: 0.33; color: root.ringColor(root.rimPhase + 0.33) }
+                    GradientStop { position: 0.50; color: root.ringColor(root.rimPhase + 0.50) }
+                    GradientStop { position: 0.67; color: root.ringColor(root.rimPhase + 0.67) }
+                    GradientStop { position: 0.83; color: root.ringColor(root.rimPhase + 0.83) }
+                    GradientStop { position: 1.00; color: root.ringColor(root.rimPhase + 1.00) }
                 }
-                PathSvg { path: root.rounded(root.polyPoints(root.rFrame), root.corner) + " " + root.rounded(root.polyPoints(root.rFrame - 2.2), root.corner) }
+                PathSvg { path: root.rounded(root.polyPoints(root.rFrame), root.corner) + " " + root.rounded(root.polyPoints(root.rFrame - 3), root.corner) }
             }
             ShapePath {                                   // soft inner line, gives the rim depth
                 fillColor: "transparent"
@@ -265,7 +286,7 @@ Item {
                 property bool active: index < backend.options.length
                 property var opt: active ? backend.options[index]
                                          : ({ "label": "", "icon": "", "group": false, "color": "#8e8e93" })
-                property color tint: opt.color
+                property color tint: root.logoColor(index)      // the logo's own colours, pane by pane
                 property real pop: (root.hover === index && active) ? 1 : 0
                 Behavior on pop { enabled: !root.calm; SpringAnimation { spring: 4.2; damping: 0.62; epsilon: 0.0008 } }
                 property real bloom: 0                 // 0 = folded into the centre, 1 = in place
