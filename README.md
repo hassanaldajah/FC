@@ -1,6 +1,6 @@
 <img src="docs/logo.png" width="128" alt="FC logo">
 
-# FC
+# FC (File Converter)
 
 ![FC octagon menu](docs/preview.png)
 
@@ -14,7 +14,7 @@ Before a tool runs it asks where to save the result. Your original file is never
 [VirusTotal](https://www.virustotal.com) page in your browser. The file itself is never uploaded.
 
 ## Download and verify
-1. Open the [latest release](https://github.com/hassanaldajah/HK-File/releases/latest) and download
+1. Open the [latest release](https://github.com/hassanaldajah/FC/releases/latest) and download
    `FC-<version>-win64.exe` (Windows) or `FC-<version>-x86_64.AppImage` (Linux) and its `.sha256` file.
 2. Check the checksum (Windows, PowerShell; on Linux use `sha256sum -c FC-<version>-x86_64.AppImage.sha256`). The two values must be the same:
    ```powershell
@@ -24,7 +24,7 @@ Before a tool runs it asks where to save the result. Your original file is never
 3. Optional, stronger: prove the exe was built by this repository's GitHub Actions from the
    tagged source code (needs the free [GitHub CLI](https://cli.github.com/)):
    ```powershell
-   gh attestation verify .\FC-1.1.1-win64.exe --repo hassanaldajah/HK-File
+   gh attestation verify .\FC-1.1.1-win64.exe --repo hassanaldajah/FC
    ```
 4. Optional: scan the download on [VirusTotal](https://www.virustotal.com) (use **Scan › Virus check** in FC,
    or upload it there). Unsigned programs packed with PyInstaller sometimes get a lone false positive

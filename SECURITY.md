@@ -1,13 +1,13 @@
 # Security policy
 
 ## Supported versions
-Only the latest release on the [Releases page](https://github.com/hassanaldajah/HK-File/releases)
+Only the latest release on the [Releases page](https://github.com/hassanaldajah/FC/releases)
 gets security fixes.
 
 ## Reporting a vulnerability
 Please **do not** open a public issue. Use GitHub's private reporting instead:
 **Security** tab → **Report a vulnerability**
-([direct link](https://github.com/hassanaldajah/HK-File/security/advisories/new)).
+([direct link](https://github.com/hassanaldajah/FC/security/advisories/new)).
 
 Include what you did, what happened, and a sample file if one is needed to show it.
 This is a one-person project, so replies are best effort, usually within a week.

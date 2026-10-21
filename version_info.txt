@@ -6,12 +6,12 @@ VSVersionInfo(
   kids=[
     StringFileInfo([StringTable('040904B0', [
       StringStruct('CompanyName', 'Hassan Aldajah'),
-      StringStruct('FileDescription', 'FC - convert, compress and edit files'),
+      StringStruct('FileDescription', 'FC (File Converter) - convert, compress and edit files'),
       StringStruct('FileVersion', '1.1.1'),
       StringStruct('InternalName', 'FC'),
       StringStruct('LegalCopyright', 'Copyright (c) 2026 Hassan Aldajah'),
       StringStruct('OriginalFilename', 'FC.exe'),
-      StringStruct('ProductName', 'FC'),
+      StringStruct('ProductName', 'FC (File Converter)'),
       StringStruct('ProductVersion', '1.1.1')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
