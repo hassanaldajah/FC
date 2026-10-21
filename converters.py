@@ -56,7 +56,7 @@ def targets_for(paths: list[Path]) -> list[str]:
         own = path.suffix.lower().lstrip(".")
         options = [t for t in TARGETS[kind] if t != own and not (own == "jpeg" and t == "jpg")]
         common = options if common is None else [t for t in common if t in options]
-    return (common or [])[:6]
+    return (common or [])[:7]
 
 
 def _free_name(src: Path, ext: str, suffix: str = "") -> Path:

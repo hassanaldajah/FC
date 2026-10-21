@@ -1,0 +1,18 @@
+# Windows file properties for HK File.exe (Details tab). Keep the numbers in step with
+# VERSION in hkfile.py; the release workflow refuses a tag that does not match.
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(1, 0, 0, 0), prodvers=(1, 0, 0, 0), mask=0x3f, flags=0x0,
+                    OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', 'Hassan Aldajah'),
+      StringStruct('FileDescription', 'HK File - convert, compress and edit files'),
+      StringStruct('FileVersion', '1.0.0'),
+      StringStruct('InternalName', 'HK File'),
+      StringStruct('LegalCopyright', 'Copyright (c) 2026 Hassan Aldajah'),
+      StringStruct('OriginalFilename', 'HK File.exe'),
+      StringStruct('ProductName', 'HK File'),
+      StringStruct('ProductVersion', '1.0.0')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

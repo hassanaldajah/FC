@@ -7,9 +7,7 @@ Every tool writes new files next to the source and returns their paths.
 from __future__ import annotations
 
 import io
-import shutil
 import subprocess
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -18,6 +16,10 @@ import pdf_tools
 from converters import _free_name, kind_of
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+MAX_INPUT = 4 << 30              # 4 GB per input file
+MAX_ZIP_MEMBERS = 20_000         # Office files are ZIPs: limits against zip bombs
+MAX_ZIP_MEMBER = 512 << 20       # 512 MB unpacked per part
+MAX_ZIP_TOTAL = 2 << 30          # 2 GB unpacked in total
 
 
 def _folder(src: Path, tag: str) -> Path:
@@ -116,11 +118,39 @@ def split_image(src: Path, _arg: str = "") -> list[Path]:
     return [folder]
 
 
+def watermark_image(src: Path, text: str) -> list[Path]:
+    """A large, faint, diagonal line of text across the picture."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    text = (text or "CONFIDENTIAL").strip()[:60]
+    img = _img_open_rgb(src).convert("RGBA")
+    w, h = img.size
+    size = max(16, int(min(w, h) / max(5, len(text)) * 1.7))
+    try:
+        font = ImageFont.truetype("segoeuib.ttf", size)
+    except OSError:
+        font = ImageFont.load_default()
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    draw.text((w / 2, h / 2), text, font=font, anchor="mm", fill=(255, 255, 255, 70),
+              stroke_width=max(1, size // 30), stroke_fill=(0, 0, 0, 55))
+    layer = layer.rotate(30, resample=Image.BICUBIC, center=(w / 2, h / 2))
+    out = _free_name(src, src.suffix.lstrip(".").lower(), " (watermark)")
+    result = Image.alpha_composite(img, layer)
+    (result.convert("RGB") if out.suffix.lower() in (".jpg", ".jpeg", ".bmp") else result).save(out)
+    return [out]
+
+
 # ================================================================ Office files
 def _recompress_office(src: Path, _arg: str = "") -> list[Path]:
     """docx / pptx / xlsx are ZIPs: shrink the pictures inside and repack."""
     from PIL import Image
 
+    with zipfile.ZipFile(src) as zin:                 # refuse zip bombs before writing anything
+        items = zin.infolist()
+        if (len(items) > MAX_ZIP_MEMBERS or any(i.file_size > MAX_ZIP_MEMBER for i in items)
+                or sum(i.file_size for i in items) > MAX_ZIP_TOTAL):
+            raise ValueError("this file unpacks to something far too large")
     out = _free_name(src, src.suffix.lstrip(".").lower(), " (compressed)")
     with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED,
                                                       compresslevel=9) as zout:
@@ -200,6 +230,60 @@ def protect_word(src: Path, password: str) -> list[Path]:
     return [out]
 
 
+def watermark_word(src: Path, text: str) -> list[Path]:
+    """Word's own kind of watermark: faint diagonal text behind every page."""
+    text = (text or "CONFIDENTIAL").strip()[:60]
+    out = _free_name(src, "docx", " (watermark)")
+    word = _office("Word.Application")
+    try:
+        word.Visible = False
+        word.DisplayAlerts = 0
+        doc = word.Documents.Open(str(src), ReadOnly=True, AddToRecentFiles=False)
+        for i in range(1, doc.Sections.Count + 1):
+            section = doc.Sections(i)
+            page_w, page_h = section.PageSetup.PageWidth, section.PageSetup.PageHeight
+            header = section.Headers(1)                   # primary header holds it
+            shape = header.Shapes.AddTextEffect(0, text, "Segoe UI", 66, True, False, 0, 0)
+            shape.Fill.ForeColor.RGB = 0xC0C0C0
+            shape.Fill.Transparency = 0.6
+            shape.Line.Visible = False
+            shape.WrapFormat.Type = 3                 # behind text
+            shape.RelativeHorizontalPosition = 1      # measured from the page
+            shape.RelativeVerticalPosition = 1
+            shape.Left = (page_w - shape.Width) / 2
+            shape.Top = (page_h - shape.Height) / 2
+            shape.Rotation = 315
+        doc.SaveAs2(str(out), FileFormat=16)
+        doc.Close(False)
+    finally:
+        word.Quit()
+    return [out]
+
+
+def watermark_slides(src: Path, text: str) -> list[Path]:
+    text = (text or "CONFIDENTIAL").strip()[:60]
+    out = _free_name(src, "pptx", " (watermark)")
+    app = _office("PowerPoint.Application")
+    try:
+        pres = app.Presentations.Open(str(src), ReadOnly=True, WithWindow=False)
+        w, h = pres.PageSetup.SlideWidth, pres.PageSetup.SlideHeight
+        for i in range(1, pres.Slides.Count + 1):
+            box = pres.Slides(i).Shapes.AddTextbox(1, w * 0.1, h * 0.4, w * 0.8, h * 0.2)
+            rng = box.TextFrame.TextRange
+            rng.Text = text
+            rng.Font.Size = max(24, int(w / max(6, len(text)) * 1.4))
+            rng.Font.Bold = True
+            rng.Font.Color.RGB = 0xC0C0C0
+            rng.ParagraphFormat.Alignment = 2          # centred
+            box.TextFrame2.TextRange.Font.Fill.Transparency = 0.6
+            box.Rotation = 330
+        pres.SaveAs(str(out), 24)
+        pres.Close()
+    finally:
+        app.Quit()
+    return [out]
+
+
 def split_word(src: Path, _arg: str = "") -> list[Path]:
     """One PDF per page (Word has no stable page objects to cut a .docx by)."""
     pdf = converters._office_word(src, "pdf")
@@ -270,7 +354,7 @@ def merge_sheets(paths: list[Path], _arg: str = "") -> list[Path]:
         target = excel.Workbooks.Add()
         first_blank = target.Worksheets(1)
         for p in paths:
-            book = excel.Workbooks.Open(str(p), ReadOnly=True)
+            book = excel.Workbooks.Open(str(p), UpdateLinks=0, ReadOnly=True)
             for k in range(1, book.Worksheets.Count + 1):
                 book.Worksheets(k).Copy(After=target.Worksheets(target.Worksheets.Count))
             book.Close(False)
@@ -288,7 +372,7 @@ def split_sheets(src: Path, _arg: str = "") -> list[Path]:
     try:
         excel.Visible = False
         excel.DisplayAlerts = False
-        book = excel.Workbooks.Open(str(src), ReadOnly=True)
+        book = excel.Workbooks.Open(str(src), UpdateLinks=0, ReadOnly=True)
         for k in range(1, book.Worksheets.Count + 1):
             sheet = book.Worksheets(k)
             name = "".join(ch for ch in sheet.Name if ch not in '\\/:*?"<>|') or f"sheet{k}"
@@ -310,7 +394,7 @@ def protect_sheets(src: Path, password: str) -> list[Path]:
     try:
         excel.Visible = False
         excel.DisplayAlerts = False
-        book = excel.Workbooks.Open(str(src), ReadOnly=True)
+        book = excel.Workbooks.Open(str(src), UpdateLinks=0, ReadOnly=True)
         book.SaveAs(str(out), 51, password)
         book.Close(False)
     finally:
@@ -384,6 +468,9 @@ TOOLS.update({
     "img_rotate": ("Rotate ↻", rotate_image, None, "each"),
     "img_split": ("Split in 4", split_image, None, "each"),
     "img_protect": ("Protect", protect_images, "password", "all"),
+    "img_watermark": ("Watermark", watermark_image, "text", "each"),
+    "word_watermark": ("Watermark", watermark_word, "text", "each"),
+    "ppt_watermark": ("Watermark", watermark_slides, "text", "each"),
     "office_compress": ("Compress", _recompress_office, None, "each"),
     "word_merge": ("Merge", merge_word, None, "all"),
     "word_split": ("Split", split_word, None, "each"),
@@ -415,13 +502,17 @@ def top_menu(paths: list[Path]) -> list[tuple[str, str]]:
         return pdf_tools.pdf_menu(many)
     if kind in OFFICE_KEYS:
         merge_k, split_k, protect_k = OFFICE_KEYS[kind]
+        sixth = {"word": ("Watermark", "word_watermark"),
+                 "slides": ("Watermark", "ppt_watermark")}.get(kind, ("Zip", "zip"))
         return [("Convert", ">Convert"), ("Compress", "office_compress"),
                 ("Merge", merge_k) if many else ("Split", split_k),
-                ("Protect", protect_k), ("Zip", "zip"), ("Lock in ZIP", "zip_lock")]
+                ("Protect", protect_k), sixth, ("Lock in ZIP", "zip_lock")] + (
+            [("Zip", "zip")] if kind in ("word", "slides") else [])
     if kind == "image":
         return [("Convert", ">Convert"), ("Compress", "img_compress"),
                 ("One PDF", "img_pdf") if many else ("Split in 4", "img_split"),
-                ("Protect", "img_protect"), ("Resize 50%", "img_resize"), ("Rotate ↻", "img_rotate")]
+                ("Protect", "img_protect"), ("Edit", ">ImageEdit"), ("Zip", "zip"),
+                ("Lock in ZIP", "zip_lock")]
     if kind in ("audio", "video"):
         return [("Convert", ">Convert"), ("Compress", "media_compress"),
                 ("Merge", "media_merge") if many else ("Split", "media_split"),
@@ -432,12 +523,28 @@ def top_menu(paths: list[Path]) -> list[tuple[str, str]]:
 
 
 def group_menu(group: str, paths: list[Path]) -> list[tuple[str, str]]:
+    if group == "ImageEdit":
+        return [("Watermark", "img_watermark"), ("Resize 50%", "img_resize"), ("Rotate ↻", "img_rotate")]
     if group == "Convert" and {kind_of(p) for p in paths} != {"pdf"}:
         return [(t.upper(), "fmt:" + t) for t in converters.targets_for(paths)]
     return pdf_tools.group_menu(group)
 
 
+def _checked(paths: list[Path]) -> list[Path]:
+    """Absolute, existing, regular files of a sane size; anything else is refused."""
+    out = []
+    for p in paths:
+        p = Path(p).resolve()
+        if not p.is_file():
+            raise ValueError(f"not a file: {p.name}")
+        if p.stat().st_size > MAX_INPUT:
+            raise ValueError(f"{p.name} is larger than {MAX_INPUT >> 30} GB")
+        out.append(p)
+    return out
+
+
 def run(key: str, paths: list[Path], arg: str = "") -> list[Path]:
+    paths = _checked(paths)
     if key.startswith("fmt:"):
         return [converters.convert(p, key[4:]) for p in paths]
     _label, tool, _needs, scope = TOOLS[key]

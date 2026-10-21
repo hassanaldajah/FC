@@ -1,0 +1,13 @@
+# Weekly pull requests when a dependency or a pinned GitHub Action has an update.
+# Review each one before merging: read the changelog, let CodeQL run, test the app.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

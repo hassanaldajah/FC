@@ -1,3 +1,15 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
+lockenv/
+
+# build output (releases are built by GitHub Actions, never committed)
+build/
+dist/
+*.exe
+
+# secrets and local settings
+.env
+.env.*
+*.log

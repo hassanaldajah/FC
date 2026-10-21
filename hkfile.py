@@ -1,73 +1,109 @@
-"""HK File: select files in File Explorer, press Ctrl+Alt+C (or hold Shift
-and scroll), and pick the new format from a hexagon around the mouse.
+"""HK File: a frosted-glass hexagon that converts, compresses, merges, splits
+and protects files.
 
-Runs in the background with a tray icon. Converted files are saved next to
-the originals; nothing is overwritten and nothing leaves the computer.
+Open it and the hexagon appears on screen (with its own taskbar button).
+Drop files on it, pick them from its "Choose files" side, or select files in
+File Explorer and press Ctrl+Alt+C (or hold Shift and scroll): the hexagon
+turns into the tools for those files. Results are saved next to the
+originals; nothing is overwritten and nothing leaves the computer.
 """
 from __future__ import annotations
 
+import ctypes
+import logging
 import math
 import os
+import shutil
+import subprocess
 import sys
+import threading
 import time
 import warnings
+from ctypes import wintypes
 from pathlib import Path
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from PyQt6.QtCore import (QEasingCurve, QObject, QPointF, QPropertyAnimation, QRectF,
-                          Qt, QThread, QTimer, pyqtProperty, pyqtSignal)
-from PyQt6.QtGui import (QAction, QBrush, QColor, QCursor, QFont, QIcon, QLinearGradient,
-                         QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient)
-from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QSystemTrayIcon, QWidget
+from PyQt6.QtCore import (QObject, QPoint, QPointF, Qt, QThread, QTimer, QUrl, pyqtProperty,
+                          pyqtSignal, pyqtSlot)
+from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QImage, QPolygonF, QRegion
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtQuick import QQuickImageProvider, QQuickView
+from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit
 
-import converters
 import explorer
 import file_tools
+import history
+import scanner
 
-ACCENT = QColor(255, 51, 68)
-NAVY = QColor(13, 20, 40, 235)
-TEXT = QColor(244, 246, 251)
-MUTED = QColor(164, 177, 205)
-SIZE = 360          # overlay window
-R_OUT = 150         # hexagon radius
-R_IN = 52           # centre hole
-POP_SHIFT = 12      # how far a side lifts out under the mouse (px)
-POP_SCALE = 0.09    # and how much bigger it gets
+APP_ID = "HassanAldajah.HKFile"
+INSTANCE_KEY = "HKFile-single-instance"
+VERSION = "1.0.0"                     # keep in step with version_info.txt and the release tag
+HERE = Path(__file__).resolve().parent
+LOG_DIR = Path(os.environ.get("LOCALAPPDATA", str(HERE))) / "HK File"
+EXPLORER = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe")   # full path, never a look-alike
+
+SIDES = 8                            # panes in the octagon; must match sideCount in hex.qml
+HOME = [("Choose files", "home:pick"), ("Scan", "home:scan"), ("Recent", ">Recent"),
+        ("PDF", "home:pdf"), ("Images", "home:images"), ("Office", "home:office"),
+        ("Media", "home:media"), ("Other files", "home:other")]
+PICK_FILTERS = {
+    "home:pick": "All files (*)",
+    "home:other": "Any file (*)",
+    "home:pdf": "PDF files (*.pdf)",
+    "home:images": "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff *.ico)",
+    "home:office": "Office files (*.docx *.doc *.rtf *.odt *.xlsx *.xls *.csv *.pptx *.ppt)",
+    "home:media": "Audio and video (*.mp3 *.wav *.flac *.ogg *.m4a *.aac *.opus *.mp4 *.mkv *.mov *.avi *.webm *.wmv)",
+}
+
+# clear, consistent colours (Apple system colours, dark-mode values)
+COLORS = {"pdf": "#ff453a", "image": "#30d158", "office": "#0a84ff", "media": "#bf5af2",
+          "pick": "#5e5ce6", "other": "#ac8e68", "scan": "#64d2ff", "recent": "#ff9f0a", "neutral": "#636366"}
+HOME_COLOR = {"home:pick": "pick", ">Recent": "recent", "home:pdf": "pdf", "home:images": "image",
+              "home:office": "office", "home:media": "media", "home:other": "other", "home:scan": "scan", "recent:open": "recent",
+              "recent:compare": "recent", "recent:versions": "recent"}
 
 
-# ------------------------------------------------------------------ hotkeys
+# ------------------------------------------------------------------ triggers
 class Triggers(QObject):
-    """Ctrl+Alt+C, or Shift + mouse wheel, while File Explorer is in front."""
+    """Ctrl+Alt+C, registered with Windows on its own thread (works in every
+    keyboard layout), and Shift + mouse wheel while File Explorer is in front."""
     fired = pyqtSignal()
 
     def __init__(self):
         super().__init__()
-        from pynput import keyboard, mouse
-
-        self._shift = False
         self._last = 0.0
+        self.hotkey_ok = None
+        threading.Thread(target=self._hotkey_loop, daemon=True).start()
 
-        def on_press(key):
-            if key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r):
-                self._shift = True
-
-        def on_release(key):
-            if key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r):
-                self._shift = False
+        from pynput import mouse
+        get_key = ctypes.windll.user32.GetAsyncKeyState
 
         def on_scroll(_x, _y, _dx, _dy):
-            if self._shift and explorer.foreground_is_explorer():
-                self._fire()
+            if get_key(0x10) & 0x8000 and explorer.foreground_is_explorer():   # Shift held
+                self.fire()
 
-        self._hotkey = keyboard.GlobalHotKeys({"<ctrl>+<alt>+c": self._fire})
-        self._keys = keyboard.Listener(on_press=on_press, on_release=on_release)
         self._mouse = mouse.Listener(on_scroll=on_scroll)
-        for listener in (self._hotkey, self._keys, self._mouse):
-            listener.daemon = True
-            listener.start()
+        self._mouse.daemon = True
+        self._mouse.start()
 
-    def _fire(self):
+    def _hotkey_loop(self):
+        user32 = ctypes.windll.user32
+        user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+        user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                                       wintypes.UINT, wintypes.UINT]
+        MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x0312
+        self.hotkey_ok = bool(user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                                                    ord("C")))
+        if not self.hotkey_ok:
+            logging.warning("Ctrl+Alt+C is already used by another program")
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == WM_HOTKEY:
+                self.fire()                 # a queued signal: safe across threads
+
+    def fire(self):
         now = time.monotonic()
         if now - self._last > 0.6:          # one wheel spin = one menu
             self._last = now
@@ -98,390 +134,510 @@ class Worker(QThread):
         self.done.emit(outputs, errors)
 
 
-# ------------------------------------------------------------------ hexagon
-def enable_blur(widget: QWidget) -> bool:
-    """Frosted-glass blur of whatever is behind the window (Windows 10/11)."""
-    import ctypes
-    from ctypes import wintypes
+# ------------------------------------------------------------------ the hexagon
+ICON_DIR = HERE / "icons"
+ICONS = {   # Lucide icons in ./icons, white, 1.5 px stroke
+    "home:pick": "folder-open", ">Recent": "history", "home:pdf": "file-text",
+    "home:images": "image", "home:office": "briefcase", "home:media": "clapperboard",
+    "home:other": "file-archive", "home:scan": "scan-line",
+    "recent:open": "folder-open", "recent:compare": "git-compare", "recent:versions": "history",
+    ">Convert": "repeat", ">Pages": "layers", ">Security": "shield", ">Edit": "pencil",
+    ">ImageEdit": "pencil", "merge": "combine", "split": "scissors", "extract": "file-output",
+    "remove": "file-minus", "rot_r": "rotate-cw", "rot_l": "rotate-cw", "rot_180": "rotate-cw",
+    "reverse": "arrow-down-up", "repair": "wrench", "protect": "lock", "unlock": "lock-open",
+    "strip": "eraser", "watermark": "stamp", "numbers": "hash", "to_jpg": "image",
+    "to_png": "image", "to_word": "file-type", "to_txt": "file-type", "to_pptx": "file-type",
+    "images": "images", "img_pdf": "file-text", "zip": "file-archive", "zip_lock": "file-lock",
+    "img_resize": "scaling", "img_rotate": "rotate-cw",
+}
 
-    class AccentPolicy(ctypes.Structure):
-        _fields_ = [("AccentState", ctypes.c_int), ("AccentFlags", ctypes.c_int),
-                    ("GradientColor", ctypes.c_uint), ("AnimationId", ctypes.c_int)]
 
-    class CompositionData(ctypes.Structure):
-        _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.c_void_p),
-                    ("SizeOfData", ctypes.c_size_t)]
+def icon_for(key: str) -> str:
+    name = ICONS.get(key)
+    if name is None:
+        for part, icon in (("watermark", "stamp"), ("compress", "minimize-2"), ("merge", "combine"),
+                           ("split", "scissors"), ("protect", "lock"), ("fmt:", "repeat")):
+            if part in key:
+                name = icon
+                break
+    return QUrl.fromLocalFile(str(ICON_DIR / f"{name or 'file-type'}.svg")).toString()
 
+
+def reduced_motion() -> bool:
+    """Windows 'Show animations in Windows' switched off = keep motion minimal."""
     try:
-        accent = AccentPolicy(3, 0, 0, 0)                 # 3 = blur behind
-        data = CompositionData(19, ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p),
-                               ctypes.sizeof(accent))     # 19 = accent policy
-        fn = ctypes.windll.user32.SetWindowCompositionAttribute
-        fn.argtypes = [wintypes.HWND, ctypes.POINTER(CompositionData)]
-        return bool(fn(int(widget.winId()), ctypes.byref(data)))
-    except Exception:  # noqa: BLE001 - no blur: the glass is just a bit more opaque
+        on = ctypes.c_int(1)
+        ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(on), 0)  # SPI_GETCLIENTAREAANIMATION
+        return not on.value
+    except Exception:  # noqa: BLE001
         return False
 
 
-def lerp(a: float, b: float, t: float) -> float:
-    return a + (b - a) * t
+def app_icon() -> QIcon:
+    ico = HERE / "hkfile.ico"
+    return QIcon(str(ico)) if ico.exists() else QIcon()
 
 
-class HexMenu(QWidget):
-    """A hexagon of frosted glass. Six sides, one choice each; the middle goes
-    back or closes. Every change (open, hover, switching groups) is animated."""
+class ShotProvider(QQuickImageProvider):
+    """Hands the blurred-glass layer a snapshot of the desktop behind us."""
+    def __init__(self):
+        super().__init__(QQuickImageProvider.ImageType.Image)
+        self.image = QImage()
+
+    def requestImage(self, _id, _size):
+        return self.image, self.image.size()
+
+
+class Backend(QObject):
+    """State shared with hex.qml."""
+    changed = pyqtSignal()
+    openRequested = pyqtSignal()
+    closeRequested = pyqtSignal(str)
+    optionsReplaced = pyqtSignal()
     chosen = pyqtSignal(str)
+    dropped = pyqtSignal(list)
+    moveRequested = pyqtSignal()
+    glassRequested = pyqtSignal()
+    closeFinished = pyqtSignal(str)
 
     def __init__(self):
-        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-                         | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setMouseTracking(True)
-        self.setFixedSize(SIZE, SIZE)
-        self.options: list[tuple[str, str]] = []
-        self.label = ""
-        self.stack: list[tuple[list, str]] = []   # menus to go back to
-        self.resolve = lambda group: []              # set by the app
-        self.hover = -1
-        self.glow = [0.0] * 6        # animated highlight of each side, 0..1
-        self.centre_glow = 0.0
-        self.t_open = 0.0            # 0 -> 1 when the menu appears
-        self.t_swap = 1.0            # 0 -> 1 when a group opens or closes
-        self.closing = False
-        self.blurred = False
-        self._last = time.monotonic()
-        self.clock = QTimer(self)
-        self.clock.setInterval(8)                  # ~120 fps, smooth on fast screens
-        self.clock.timeout.connect(self._tick)
+        super().__init__()
+        self._options: list[dict] = []
+        self._keys: list[str] = []
+        self._title = ""
+        self._flash = ""
+        self._drop = False
+        self._win = (0, 0)
+        self._shot = ""
+        self._calm = reduced_motion()
+        self._first = True                   # the opening animation plays once
+        self.kind = "neutral"                 # tint of the menus for the current files
+        self.home = True
+        self.stack: list[tuple] = []
+        self.resolve = lambda group: []
+        self.flash_timer = QTimer(self)
+        self.flash_timer.setSingleShot(True)
+        self.flash_timer.timeout.connect(lambda: self.set_flash(""))
 
-    # ---- animation loop: everything eases towards its target each frame
-    def _tick(self):
-        now = time.monotonic()
-        dt = min(0.05, now - self._last)
-        self._last = now
-        k = 1 - math.exp(-dt * 18)                 # frame-rate independent easing
-        for i in range(6):
-            self.glow[i] = lerp(self.glow[i], 1.0 if i == self.hover else 0.0, k)
-        self.centre_glow = lerp(self.centre_glow, 1.0 if self.hover == -2 else 0.0, k)
-        if self.closing:
-            self.t_open = max(0.0, self.t_open - dt * 7)
-            if self.t_open <= 0.001:
-                self.clock.stop()
-                self.closing = False
-                super().hide()
-                return
-        else:
-            self.t_open = min(1.0, self.t_open + dt * 5.5)
-        self.t_swap = min(1.0, self.t_swap + dt * 6)
-        self._update_mask()
-        self.update()
+    # ---- properties read by QML
+    @pyqtProperty("QVariantList", notify=changed)
+    def options(self): return self._options
 
-    def _ease(self, t: float) -> float:            # ease-out with a soft overshoot
-        c1, c3 = 1.2, 2.2
-        return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2 if t < 1 else 1.0
+    @pyqtProperty(str, notify=changed)
+    def title(self): return self._title
 
-    def _scale(self) -> float:
-        return 0.82 + 0.18 * self._ease(self.t_open)
+    @pyqtProperty(str, notify=changed)
+    def flash(self): return self._flash
 
-    def _update_mask(self):
-        from PyQt6.QtGui import QRegion, QTransform
-        c = SIZE / 2
-        sc = self._scale()
-        zoom = QTransform().translate(c, c).scale(sc, sc).translate(-c, -c)
-        region = QRegion(zoom.map(QPolygonF([self._corner(k, R_OUT + 2) for k in range(6)])).toPolygon())
-        for k in range(min(6, len(self.options))):
-            if self.glow[k] > 0.01:
-                region = region.united(QRegion(zoom.map(self._pop(k, self.glow[k], 3)).toPolygon()))
-        self.setMask(region)
+    @pyqtProperty(bool, notify=changed)
+    def canGoBack(self): return bool(self.stack) or not self.home
 
-    # ---- open / close
-    def open_at(self, pos, options, label: str):
-        self.stack = []
-        self.options, self.label, self.hover = options, label, -1
-        self.glow = [0.0] * 6
-        self.t_open, self.t_swap, self.closing = 0.0, 1.0, False
-        self.move(pos.x() - SIZE // 2, pos.y() - SIZE // 2)
-        self._update_mask()
-        self.show()
-        if not self.blurred:
-            self.blurred = enable_blur(self)
-        self.raise_()
-        self.activateWindow()
-        self.setFocus()
-        self._last = time.monotonic()
-        self.clock.start()
+    @pyqtProperty(bool, notify=changed)
+    def dropActive(self): return self._drop
 
-    def hide(self):                                 # fade out instead of vanishing
-        if self.isVisible() and not self.closing:
-            self.closing = True
-            self._last = time.monotonic()
-            self.clock.start()
+    @pyqtProperty(float, notify=changed)
+    def winX(self): return float(self._win[0])
 
+    @pyqtProperty(float, notify=changed)
+    def winY(self): return float(self._win[1])
+
+    @pyqtProperty(str, notify=changed)
+    def shotUrl(self): return self._shot
+
+    @pyqtProperty(bool, constant=True)
+    def reducedMotion(self): return self._calm
+
+    @pyqtProperty(bool, notify=changed)
+    def firstOpen(self): return self._first
+
+    @pyqtSlot()
+    def opened(self):
+        # read by QML only when opening, so no change signal: emitting one here would make
+        # every binding re-evaluate in the middle of the opening animation
+        self._first = False
+
+    @pyqtProperty(str, constant=True)
+    def iconDir(self): return QUrl.fromLocalFile(str(ICON_DIR)).toString() + "/"
+
+    # ---- setters used from Python
+    def set_menu(self, options, title: str):
+        self._keys = [k for _, k in options]
+        self._options = [{"label": lbl, "icon": icon_for(k), "group": k.startswith(">"),
+                          "color": COLORS[HOME_COLOR.get(k, "neutral") if self.home else self.kind]}
+                         for lbl, k in options]
+        self._title = title
+        self.changed.emit()
+        self.optionsReplaced.emit()
+
+    def set_flash(self, text: str, seconds: float = 0):
+        self._flash = text
+        self.changed.emit()
+        if text and seconds:
+            self.flash_timer.start(int(seconds * 1000))
+
+    def set_window(self, x: int, y: int):
+        self._win = (x, y)
+        self.changed.emit()
+
+    def set_shot(self, url: str):
+        self._shot = url
+        self.changed.emit()
+
+    # ---- slots called from QML
+    @pyqtSlot(int)
     def pick(self, k: int):
-        label, key = self.options[k]
-        if key.startswith(">"):                     # a group: show its tools
-            self.stack.append((self.options, self.label))
-            self.options = self.resolve(key[1:])
-            self.label, self.hover = label, -1
-            self.t_swap = 0.0
+        if not 0 <= k < len(self._keys):
             return
-        self.hide()
+        key = self._keys[k]
+        if key.startswith(">"):                       # a group: its tools
+            self.stack.append(([(o["label"], kk) for o, kk in zip(self._options, self._keys)], self._title))
+            self.set_menu(self.resolve(key[1:]), self._options[k]["label"])
+            return
         self.chosen.emit(key)
 
+    @pyqtSlot()
     def back(self):
         if self.stack:
-            self.options, self.label = self.stack.pop()
-            self.hover = -1
-            self.t_swap = 0.0
-        else:
-            self.hide()
+            options, title = self.stack.pop()
+            self.set_menu(options, title)
+        elif not self.home:
+            self.chosen.emit("home:back")
 
-    # ---- geometry: six wedges of a hexagon, one per option
-    def _corner(self, k: int, radius: float) -> QPointF:
-        a = math.radians(60 * k - 90)
-        c = SIZE / 2
-        return QPointF(c + radius * math.cos(a), c + radius * math.sin(a))
-
-    def _wedge(self, k: int, r_out: float, r_in: float) -> QPolygonF:
-        return QPolygonF([self._corner(k, r_in), self._corner(k, r_out),
-                          self._corner(k + 1, r_out), self._corner(k + 1, r_in)])
-
-    def _pop_transform(self, k: int, g: float):
-        """Lift side k out of the hexagon: move it outwards and make it bigger."""
-        from PyQt6.QtGui import QTransform
-        c = SIZE / 2
-        mid = math.radians(60 * k - 60)
-        cx = c + (R_OUT + R_IN) / 2 * math.cos(mid)
-        cy = c + (R_OUT + R_IN) / 2 * math.sin(mid)
-        dx, dy = POP_SHIFT * g * math.cos(mid), POP_SHIFT * g * math.sin(mid)
-        sc = 1 + POP_SCALE * g
-        return QTransform().translate(cx + dx, cy + dy).scale(sc, sc).translate(-cx, -cy)
-
-    def _pop(self, k: int, g: float, grow: float = 0.0) -> QPolygonF:
-        return self._pop_transform(k, g).map(self._wedge(k, R_OUT + grow, R_IN - grow))
-
-    def _index_at(self, x: float, y: float) -> int:
-        c = SIZE / 2
-        dx, dy = x - c, y - c
-        d = math.hypot(dx, dy)
-        if d < R_IN:
-            return -2                               # the centre
-        if d > R_OUT + 6:
-            return -1
-        ang = (math.degrees(math.atan2(dy, dx)) + 90) % 360
-        k = int(ang // 60)
-        return k if k < len(self.options) else -1
-
-    # ---- drawing
-    def paintEvent(self, _event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        c = SIZE / 2
-        fade = min(1.0, self.t_open * 1.4)
-        p.setOpacity(fade)
-        p.translate(c, c)
-        p.scale(self._scale(), self._scale())
-        p.translate(-c, -c)
-
-        outer = QPolygonF([self._corner(k, R_OUT) for k in range(6)])
-        path = QPainterPath()
-        path.addPolygon(outer)
-        path.closeSubpath()
-
-        # the glass body: light frost, a little brighter at the top
-        body = QLinearGradient(QPointF(c, c - R_OUT), QPointF(c, c + R_OUT))
-        base = 34 if self.blurred else 150
-        body.setColorAt(0.0, QColor(255, 255, 255, base + 26))
-        body.setColorAt(0.5, QColor(240, 244, 255, base))
-        body.setColorAt(1.0, QColor(225, 232, 250, base - 6))
-        p.fillPath(path, QColor(18, 22, 34, 120 if self.blurred else 215))
-        p.fillPath(path, body)
-
-        # hair-thin separators and the glass edge
-        p.setPen(QPen(QColor(255, 255, 255, 46), 1.0))
-        for k in range(6):
-            p.drawLine(self._corner(k, R_IN), self._corner(k, R_OUT))
-        edge = QLinearGradient(QPointF(c, c - R_OUT), QPointF(c, c + R_OUT))
-        edge.setColorAt(0.0, QColor(255, 255, 255, 170))
-        edge.setColorAt(1.0, QColor(255, 255, 255, 55))
-        p.setPen(QPen(QBrush(edge), 1.4))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-
-        # the side under the mouse lifts out like a pane of glass (3D)
-        for k in range(min(6, len(self.options))):
-            g = self.glow[k]
-            if g < 0.01:
-                continue
-            hole = QPainterPath()                   # where it lifted from looks deeper
-            hole.addPolygon(self._wedge(k, R_OUT, R_IN))
-            p.fillPath(hole, QColor(0, 0, 0, int(55 * g)))
-            mid = math.radians(60 * k - 60)
-            for i, a in enumerate((40, 26, 14)):   # soft shadow under the pane
-                sh = QPainterPath()
-                sh.addPolygon(self._pop(k, g * 0.8, 2 + i * 2).translated(
-                    3 * g * math.cos(mid), 8 * g + i * 2))
-                p.fillPath(sh, QColor(0, 0, 0, int(a * g)))
-            pane = QPainterPath()
-            pane.addPolygon(self._pop(k, g))
-            pane.closeSubpath()
-            p.fillPath(pane, QColor(18, 22, 34, int((120 if self.blurred else 215) * g)))
-            lit = QLinearGradient(QPointF(c, c - R_OUT), QPointF(c, c + R_OUT))
-            lit.setColorAt(0.0, QColor(255, 255, 255, int(120 * g)))
-            lit.setColorAt(1.0, QColor(255, 255, 255, int(55 * g)))
-            p.fillPath(pane, lit)
-            rim = QLinearGradient(QPointF(c, c - R_OUT), QPointF(c, c + R_OUT))
-            rim.setColorAt(0.0, QColor(255, 255, 255, int(235 * g)))
-            rim.setColorAt(1.0, QColor(255, 255, 255, int(110 * g)))
-            p.setPen(QPen(QBrush(rim), 1.6))
-            p.drawPath(pane)
-
-        # labels slide in when a group opens
-        swap = self._ease(self.t_swap)
-        p.save()
-        p.setOpacity(fade * min(1.0, self.t_swap * 1.6))
-        for k in range(min(6, len(self.options))):
-            text, key = self.options[k]
-            if key.startswith(">"):
-                text += "  ›"
-            mid = math.radians(60 * k - 60)
-            rr = 92 + (1 - swap) * 14
-            g = self.glow[k]
-            spot = self._pop_transform(k, g).map(QPointF(c + rr * math.cos(mid), c + rr * math.sin(mid)))
-            tx, ty = spot.x(), spot.y()
-            size = 12 if len(text) <= 7 else 10
-            if g > 0.5:
-                size += 1
-            p.setFont(QFont("Segoe UI Variable Display", size, QFont.Weight.DemiBold))
-            box = QRectF(tx - 42, ty - 22, 84, 44)
-            flags = Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap
-            p.setPen(QColor(0, 0, 0, 70))                 # soft shadow keeps text readable
-            p.drawText(box.translated(0, 1), flags, text)
-            p.setPen(QColor(255, 255, 255, int(lerp(215, 255, g))))
-            p.drawText(box, flags, text)
-        p.restore()
-
-        # centre: what is selected, and back / close
-        hub = QPainterPath()
-        hub.addPolygon(QPolygonF([self._corner(k, R_IN - 4) for k in range(6)]))
-        hub.closeSubpath()
-        p.fillPath(hub, QColor(255, 255, 255, int(30 + 30 * self.centre_glow)))
-        p.setPen(QPen(QColor(255, 255, 255, 120), 1.0))
-        p.drawPath(hub)
-        p.setPen(QColor(255, 255, 255, 240))
-        p.setFont(QFont("Segoe UI Variable Display", 10, QFont.Weight.Bold))
-        p.drawText(QRectF(c - 44, c - 21, 88, 24), Qt.AlignmentFlag.AlignCenter, self.label)
-        p.setPen(QColor(255, 255, 255, 170))
-        p.setFont(QFont("Segoe UI", 8))
-        p.drawText(QRectF(c - 44, c + 2, 88, 18), Qt.AlignmentFlag.AlignCenter,
-                   "‹ Back" if self.stack else "Esc")
-
-    # ---- input
-    def mouseMoveEvent(self, e):
-        k = self._index_at(e.position().x(), e.position().y())
-        if k != self.hover:
-            self.hover = k
-            self.setCursor(Qt.CursorShape.PointingHandCursor if k >= 0 or k == -2
-                           else Qt.CursorShape.ArrowCursor)
-
-    def leaveEvent(self, _e):
-        self.hover = -1
-
-    def mousePressEvent(self, e):
-        k = self._index_at(e.position().x(), e.position().y())
-        if k >= 0:
-            self.pick(k)
-        elif k == -2:
+    @pyqtSlot()
+    def escape(self):
+        if self.stack or not self.home:
             self.back()
         else:
-            self.hide()
+            self.closeRequested.emit("min")
 
-    def wheelEvent(self, e):                 # scroll walks around the hexagon
-        if not self.options:
+    @pyqtSlot(bool)
+    def setDropActive(self, on: bool):
+        self._drop = on
+        self.changed.emit()
+
+    @pyqtSlot("QVariantList")
+    def dropUrls(self, urls):
+        files = [Path(QUrl(u).toLocalFile()) for u in urls]
+        files = [f for f in files if f.is_file()]
+        if files:
+            self.dropped.emit(files)
+
+    @pyqtSlot()
+    def minimize(self): self.closeRequested.emit("min")
+
+    @pyqtSlot()
+    def help(self):
+        self.set_flash("Drop files, or Ctrl+Alt+C in Explorer", 6)
+
+    @pyqtSlot()
+    def quit(self): self.closeRequested.emit("quit")
+
+    @pyqtSlot()
+    def startMove(self): self.moveRequested.emit()
+
+    @pyqtSlot()
+    def refreshGlass(self): self.glassRequested.emit()
+
+    @pyqtSlot(str)
+    def closeDone(self, kind: str): self.closeFinished.emit(kind)
+
+
+class HexView(QObject):
+    """The window: a frameless, transparent Qt Quick view showing hex.qml."""
+    chosen = pyqtSignal(str)
+    dropped = pyqtSignal(list)
+    W, H, CY, R = 400, 424, 226, 186     # must match hex.qml
+
+    def __init__(self):
+        super().__init__()
+        self.backend = Backend()
+        self.backend.chosen.connect(self.chosen)
+        self.backend.dropped.connect(self.dropped)
+        self.backend.moveRequested.connect(lambda: self.view.startSystemMove())
+        self.backend.closeFinished.connect(self._close_finished)
+        self.provider = ShotProvider()
+        self.shot_version = 0
+        self.shot_origin = QPoint(0, 0)
+        self.was_minimized = False
+
+        self.view = QQuickView()
+        self.view.setTitle("HK File")
+        self.view.setIcon(app_icon())
+        self.view.setFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.view.setColor(QColor(0, 0, 0, 0))
+        self.view.engine().addImageProvider("shot", self.provider)
+        self.view.rootContext().setContextProperty("backend", self.backend)
+        self.view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
+        self.view.setSource(QUrl.fromLocalFile(str(HERE / "hex.qml")))
+        for err in self.view.errors():
+            logging.error("QML: %s", err.toString())
+        self.view.resize(self.W, self.H)
+        self.view.xChanged.connect(self._moved)
+        self.view.yChanged.connect(self._moved)
+        self.settle = QTimer(singleShot=True, interval=180)      # a move has ended: fresh glass
+        self.settle.timeout.connect(self._refresh_glass)
+        self.backend.glassRequested.connect(self._refresh_glass)
+        self.view.xChanged.connect(self.settle.start)
+        self.view.yChanged.connect(self.settle.start)
+        self.view.windowStateChanged.connect(self._state_changed)
+        self._set_mask()
+
+    # ---- window shape: clicks outside the hexagon and buttons go through
+    def _set_mask(self):
+        """Only the hexagon (with room for its shadow) and the buttons take clicks."""
+        start = -90 - 180 / SIDES                   # flat top, like hex.qml
+        pts = [QPointF(self.W / 2 + (self.R + 23) * math.cos(math.radians(start + 360 / SIDES * k)),
+                       self.CY + (self.R + 23) * math.sin(math.radians(start + 360 / SIDES * k)))
+               for k in range(SIDES)]
+        buttons = QRegion(self.W // 2 + 68, self.CY - self.R - 34, 72, 36)
+        self.view.setMask(QRegion(QPolygonF(pts).toPolygon()).united(buttons))
+
+    def _allow_taskbar_minimize(self):
+        """Frameless windows ignore taskbar clicks; give it a minimize box."""
+        GWL_STYLE, WS_MINIMIZEBOX, WS_SYSMENU = -16, 0x00020000, 0x00080000
+        user32 = ctypes.windll.user32
+        user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        hwnd = int(self.view.winId())
+        style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
+        user32.SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_MINIMIZEBOX | WS_SYSMENU)
+
+    def _moved(self):
+        self.backend.set_window(self.view.x() - self.shot_origin.x(),
+                                self.view.y() - self.shot_origin.y())
+
+    def _state_changed(self, state):
+        minimized = bool(state & Qt.WindowState.WindowMinimized)
+        if self.was_minimized and not minimized:      # back from the taskbar:
+            self.view.requestActivate()               # reuse the glass we have, so the
+            self.backend.openRequested.emit()          # animation starts on the very next frame
+        self.was_minimized = minimized
+
+    # ---- the glass: snapshot the desktop while we are invisible, then pop in
+    def _refresh_and_open(self, pos: QPoint | None):
+        self.view.setOpacity(0.0)
+        if pos is not None:                     # the hexagon's centre lands on pos
+            screen = (QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()).availableGeometry()
+            x = min(max(pos.x() - self.W // 2, screen.left()), screen.right() - self.W)
+            y = min(max(pos.y() - self.CY, screen.top()), screen.bottom() - self.H)
+            self.view.setPosition(x, y)
+        QTimer.singleShot(30, self._grab_and_show)
+
+    def _grab_desktop(self):
+        """Snapshot what is behind the window for the glass. While grabbing, the window is
+        excluded from screen capture (Windows 10 2004+), so it never photographs itself."""
+        centre = self.view.geometry().center()
+        screen = QGuiApplication.screenAt(centre) or QGuiApplication.primaryScreen()
+        hwnd = wintypes.HWND(int(self.view.winId()))
+        WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
+        excluded = bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+        try:
+            img = screen.grabWindow(0).toImage()
+        finally:
+            if excluded:
+                ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)
+        self.settle.stop()                   # this snapshot is fresh: no second grab after it
+        self.provider.image = img
+        self.shot_origin = screen.geometry().topLeft()
+        self.shot_version += 1
+        self.backend.set_shot(f"image://shot/{self.shot_version}")
+        self._moved()
+        return img, screen
+
+    def _refresh_glass(self):
+        """Re-take the snapshot after a move, or when the mouse comes back."""
+        if self.view.isVisible() and not self.is_minimized() and self.view.opacity() > 0:
+            self._grab_desktop()
+
+    def _grab_and_show(self):
+        img, screen = self._grab_desktop()
+        if img.isNull() or all(img.pixelColor(img.width() * i // 5, img.height() * j // 5).value() == 0
+                               for i in range(1, 5) for j in range(1, 5)):
+            logging.warning("desktop snapshot is empty (%sx%s, dpr %s): the glass will look flat",
+                            img.width(), img.height(), screen.devicePixelRatio())
+        if os.environ.get("HKFILE_DEBUG_SHOT"):           # troubleshooting: keep what the glass sees
+            img.save(str(LOG_DIR / "last-snapshot.png"))
+        # let the GPU upload and blur the new snapshot while we are still
+        # invisible; the animation starts only once that work is done
+        self._frames_left = 2
+        self.view.frameSwapped.connect(self._after_warmup)
+        self.view.update()
+
+    def _after_warmup(self):
+        self._frames_left -= 1
+        if self._frames_left > 0:
+            self.view.update()
             return
-        step = -1 if e.angleDelta().y() > 0 else 1
-        n = min(6, len(self.options))
-        self.hover = (max(self.hover, 0) + step) % n
+        self.view.frameSwapped.disconnect(self._after_warmup)
+        self.view.setOpacity(1.0)
+        self.view.raise_()
+        self.view.requestActivate()
+        self.backend.openRequested.emit()
 
-    def keyPressEvent(self, e):
-        key = e.key()
-        if key == Qt.Key.Key_Escape:
-            self.hide()
-        elif key == Qt.Key.Key_Backspace:
-            self.back()
-        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.hover >= 0:
-            self.pick(self.hover)
-        elif Qt.Key.Key_1 <= key <= Qt.Key.Key_6:
-            k = key - Qt.Key.Key_1
-            if k < len(self.options):
-                self.pick(k)
+    # ---- what the app calls
+    def present(self, pos: QPoint | None, options, title: str, home: bool):
+        self.backend.stack = []
+        self.backend.home = home
+        self.backend.set_menu(options, title)
+        if not self.view.isVisible():
+            self.view.show()
+            self._allow_taskbar_minimize()
+            self._refresh_and_open(pos or self.view.position() + QPoint(self.W // 2, self.CY))
+        elif self.is_minimized() or pos is not None:
+            if self.is_minimized():
+                self.view.showNormal()
+            self._refresh_and_open(pos)
+        else:
+            self.view.requestActivate()
 
-    def focusOutEvent(self, _e):
-        self.hide()
+    def set_resolver(self, fn):
+        self.backend.resolve = fn
+
+    def flash(self, text: str, seconds: float = 3.0):
+        self.backend.set_flash(text, seconds)
+
+    def minimize(self):
+        self.backend.closeRequested.emit("min")
+
+    def quit(self):
+        self.backend.closeRequested.emit("quit")
+
+    def _close_finished(self, kind: str):
+        if kind == "quit":
+            QGuiApplication.instance().quit()
+        else:
+            self.view.showMinimized()
+
+    def is_minimized(self) -> bool:
+        return bool(self.view.windowState() & Qt.WindowState.WindowMinimized)
+
+    def is_visible(self) -> bool:
+        return self.view.isVisible()
+
+    def is_active(self) -> bool:
+        return self.view.isActive()
+
+    def alert(self):
+        self.view.alert(3000)
 
 
 # ------------------------------------------------------------------ app
-def tray_icon() -> QIcon:
-    pix = QPixmap(64, 64)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    path = QPainterPath()
-    pts = [QPointF(32 + 28 * math.cos(math.radians(60 * k - 90)),
-                   32 + 28 * math.sin(math.radians(60 * k - 90))) for k in range(6)]
-    path.addPolygon(QPolygonF(pts))
-    path.closeSubpath()
-    p.fillPath(path, ACCENT)
-    p.end()
-    return QIcon(pix)
-
-
 class App(QObject):
     def __init__(self, qapp: QApplication):
         super().__init__()
         self.qapp = qapp
-        self.menu = HexMenu()
-        self.menu.chosen.connect(self.convert)
+        self.hexagon = HexView()
+        self.hexagon.chosen.connect(self.on_choice)
+        self.hexagon.dropped.connect(self.open_for_files)
         self.files: list[Path] = []
+        self.results: list[Path] = []
+        self.last_sources: list[Path] = []      # what the last tool started from
+        self.last_outputs: list[Path] = []      # and what it made
         self.workers: list[Worker] = []
-        self.tray = QSystemTrayIcon(tray_icon())
-        self.tray.setToolTip("HK File: select files, then Ctrl+Alt+C or Shift + scroll")
-        menu = QMenu()
-        quit_action = QAction("Quit HK File", menu)
-        quit_action.triggered.connect(qapp.quit)
-        menu.addAction(quit_action)
-        self.tray.setContextMenu(menu)
-        self.tray.show()
         self.triggers = Triggers()
-        self.triggers.fired.connect(self.open_menu)
-        self.tray.showMessage("HK File is running",
-                              "Select files in Explorer, then press Ctrl+Alt+C or hold Shift and scroll.",
-                              QSystemTrayIcon.MessageIcon.Information, 4000)
+        self.triggers.fired.connect(self.open_from_explorer)
+        self.go_home(centre=True)
+        self.hexagon.flash("Ready")
 
-    def open_menu(self):
-        if self.menu.isVisible():
-            return
+    def go_home(self, centre: bool = False):
+        pos = None
+        if centre:
+            screen = QApplication.primaryScreen().availableGeometry()
+            pos = screen.center()
+        self.hexagon.set_resolver(self.home_group)
+        self.hexagon.present(pos, HOME, "HK File", home=True)
+
+    def home_group(self, group: str):
+        if group == "Recent":
+            return [("Open folder", "recent:open"), ("Compare", "recent:compare"),
+                    ("Versions", "recent:versions")]
+        return []
+
+    def bring_front(self):
+        self.go_home(centre=self.hexagon.is_minimized())
+
+    def open_from_explorer(self):
         files = explorer.selected_files()
         if not files:
-            self.tray.showMessage("HK File", "Select one or more files in File Explorer first.",
-                                  QSystemTrayIcon.MessageIcon.Information, 2500)
+            self.hexagon.present(None if self.hexagon.is_visible() and not self.hexagon.is_minimized()
+                                 else QCursor.pos(), HOME, "HK File", home=True)
+            self.hexagon.flash("Select files first")
             return
-        options = file_tools.top_menu(files)[:6]
-        self.menu.resolve = lambda group, files=files: file_tools.group_menu(group, files)[:6]
+        self.open_for_files(files, at_cursor=True)
+
+    def scan(self):
+        """Scan a page, save it where the user wants, then show the image tools for it."""
+        target = QFileDialog.getExistingDirectory(None, "HK File: where to save the scan?",
+                                                  str(Path.home() / "Desktop"))
+        if not target:
+            self.hexagon.flash("Cancelled", 2)
+            return
+        try:
+            page = scanner.scan_to(Path(target))
+        except scanner.NoScanner:
+            self.hexagon.flash("No scanner found. Is it on?")
+            return
+        except Exception:  # noqa: BLE001 - driver problems: tell the user, keep running
+            logging.exception("scan failed")
+            self.hexagon.flash("The scanner didn't answer")
+            return
+        if page is None:
+            self.hexagon.flash("Cancelled", 2)
+            return
+        self._tell_explorer(page)
+        self.open_for_files([page])                  # next: PDF, compress, protect...
+        self.hexagon.flash("Scanned ✓")
+
+    def open_for_files(self, files, at_cursor: bool = False):
+        options = file_tools.top_menu(files)[:SIDES]
         if not options:
-            self.tray.showMessage("HK File", "These files can't be converted together.",
-                                  QSystemTrayIcon.MessageIcon.Warning, 3000)
+            self.hexagon.flash("Can't use these together")
             return
         self.files = files
+        kinds = {file_tools.kind_of(f) for f in files}
+        kind = kinds.pop() if len(kinds) == 1 else None
+        self.hexagon.backend.kind = {"pdf": "pdf", "image": "image", "word": "office", "sheet": "office",
+                                     "slides": "office", "audio": "media", "video": "media"}.get(kind, "neutral")
+        self.hexagon.set_resolver(lambda group, files=files: file_tools.group_menu(group, files)[:SIDES])
         label = files[0].suffix.upper().lstrip(".") if len(files) == 1 else f"{len(files)} files"
-        self.menu.open_at(QCursor.pos(), options, label)
+        self.hexagon.present(QCursor.pos() if at_cursor else None, options, label, home=False)
+
+    def on_choice(self, key: str):
+        if key in PICK_FILTERS:
+            names, _ = QFileDialog.getOpenFileNames(None, "Choose files for HK File", "",
+                                                    PICK_FILTERS[key])
+            if names:
+                self.open_for_files([Path(n) for n in names])
+        elif key == "recent:open":
+            if self.results and Path(self.results[-1]).exists():
+                subprocess.Popen([EXPLORER, "/select,", str(self.results[-1])])
+            else:
+                self.hexagon.flash("No results yet")
+        elif key == "recent:compare":
+            before = next((p for p in self.last_sources if p.exists()), None)
+            after = next((p for p in self.last_outputs if Path(p).exists()), None)
+            if before and after:
+                os.startfile(history.compare(before, Path(after)))   # opens in the photo viewer
+            else:
+                self.hexagon.flash("Run a tool first")
+        elif key == "recent:versions":
+            src = next((p for p in self.last_sources if history.versions_dir(p).exists()), None)
+            if src:
+                subprocess.Popen([EXPLORER, str(history.versions_dir(src))])
+            else:
+                self.hexagon.flash("No versions yet")
+        elif key == "home:scan":
+            self.scan()
+        elif key == "home:back":
+            self.go_home()
+        else:
+            self.run_tool(key)
 
     def _ask(self, needs: str) -> str | None:
-        """Password, watermark text or page numbers; None when cancelled."""
+        """Password, watermark text, page numbers or minutes; None when cancelled."""
         if needs == "password":
-            text, ok = QInputDialog.getText(None, "HK File", "Password:",
-                                            QLineEdit.EchoMode.Password)
+            text, ok = QInputDialog.getText(None, "HK File", "Password:", QLineEdit.EchoMode.Password)
         elif needs == "text":
             text, ok = QInputDialog.getText(None, "HK File", "Watermark text:",
                                             QLineEdit.EchoMode.Normal, "CONFIDENTIAL")
@@ -492,7 +648,7 @@ class App(QObject):
             text, ok = QInputDialog.getText(None, "HK File", "Pages (e.g. 1-3, 5, 8-):")
         return text if ok and text.strip() else None
 
-    def convert(self, key: str):
+    def run_tool(self, key: str):
         files = list(self.files)
         if key.startswith("fmt:"):
             jobs = [(f.name, lambda f=f: file_tools.run(key, [f])) for f in files]
@@ -509,29 +665,120 @@ class App(QObject):
             else:
                 jobs = [(f.name, lambda f=f: file_tools.run(key, [f], arg)) for f in files]
             title = label
+        # last step before running: where should the results go?
+        start = str(files[0].parent) if files else str(Path.home() / "Desktop")
+        target = QFileDialog.getExistingDirectory(None, f"HK File: where to save ({title})?", start)
+        if not target:
+            self.hexagon.flash("Cancelled", 2)
+            return
+        target = Path(target)
         worker = Worker(jobs)
-        worker.done.connect(lambda outs, errs, w=worker: self.finished(w, outs, errs, title))
+        worker.sources = files
+        worker.done.connect(lambda outs, errs, w=worker: self.finished(w, outs, errs, title, target))
         self.workers.append(worker)
-        self.tray.showMessage("HK File", f"{title}: working on {len(files)} file(s)...",
-                              QSystemTrayIcon.MessageIcon.Information, 1500)
+        self.go_home()
+        self.hexagon.flash("Working…", 600)
         worker.start()
 
-    def finished(self, worker, outputs, errors, title):
+    @staticmethod
+    def _move_to(path: Path, folder: Path) -> Path:
+        """Move a result into the chosen folder without replacing anything there."""
+        path = Path(path)
+        if path.parent.resolve() == folder.resolve():
+            return path
+        dest = folder / path.name
+        n = 2
+        while dest.exists():
+            dest = folder / (f"{path.stem} ({n}){path.suffix}" if path.is_file() else f"{path.name} ({n})")
+            n += 1
+        shutil.move(str(path), str(dest))
+        return dest
+
+    @staticmethod
+    def _tell_explorer(path: Path):
+        """Tell Windows a file was created, so Explorer draws its real icon at once."""
+        try:
+            SHCNE_CREATE, SHCNE_MKDIR, SHCNE_UPDATEDIR, SHCNF_PATHW = 0x2, 0x8, 0x1000, 0x5
+            shell32 = ctypes.windll.shell32
+            shell32.SHChangeNotify(SHCNE_MKDIR if path.is_dir() else SHCNE_CREATE, SHCNF_PATHW,
+                                   ctypes.c_wchar_p(str(path)), None)
+            shell32.SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, ctypes.c_wchar_p(str(path.parent)), None)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def finished(self, worker, outputs, errors, title, target: Path):
         self.workers.remove(worker)
-        if errors:
-            self.tray.showMessage("HK File: something failed", "\n".join(errors)[:300],
-                                  QSystemTrayIcon.MessageIcon.Warning, 6000)
+        moved = []
+        for out in outputs:
+            try:
+                moved.append(self._move_to(out, target))
+            except OSError as exc:
+                errors.append(f"{Path(out).name}: could not move it ({exc})")
+                moved.append(Path(out))
+        outputs = moved
+        for out in outputs:
+            self._tell_explorer(Path(out))
+        self.results.extend(outputs)
         if outputs:
-            names = ", ".join(Path(o).name for o in outputs[:3])
-            self.tray.showMessage(f"HK File: {title} done", names[:200],
-                                  QSystemTrayIcon.MessageIcon.Information, 3000)
+            self.last_sources, self.last_outputs = list(worker.sources), list(outputs)
+            try:
+                history.save_versions(worker.sources, outputs, title)
+            except OSError as exc:
+                logging.warning("Could not save versions: %s", exc)
+        for err in errors:
+            logging.warning("%s failed: %s", title, err)
+        if errors and not outputs:
+            self.hexagon.flash("Failed: " + errors[0].split(": ", 1)[-1][:40], 6)
+        elif errors:
+            self.hexagon.flash(f"Done ✓ ({len(errors)} failed)", 5)
+        else:
+            self.hexagon.flash("Done ✓  Recent › Compare", 5)
+        if self.hexagon.is_minimized() or not self.hexagon.is_active():
+            self.hexagon.alert()                      # blink the taskbar button
+
+
+def single_instance(on_show) -> QLocalServer | None:
+    """If HK File already runs, bring its hexagon forward and return None."""
+    sock = QLocalSocket()
+    sock.connectToServer(INSTANCE_KEY)
+    if sock.waitForConnected(300):
+        sock.write(b"show")
+        sock.flush()
+        sock.waitForBytesWritten(300)
+        sock.disconnectFromServer()
+        return None
+    QLocalServer.removeServer(INSTANCE_KEY)
+    server = QLocalServer()
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)   # only this Windows user
+    server.listen(INSTANCE_KEY)
+
+    def on_connect():
+        conn = server.nextPendingConnection()
+        if conn is not None:
+            conn.readyRead.connect(on_show)
+    server.newConnection.connect(on_connect)
+    return server
 
 
 def main():
-    os.chdir(Path(__file__).resolve().parent)
+    os.chdir(HERE)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=LOG_DIR / "hkfile.log", level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    sys.excepthook = lambda t, v, tb: logging.critical("crash", exc_info=(t, v, tb))
+    try:  # our own taskbar button and icon instead of Python's
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:  # noqa: BLE001
+        pass
     qapp = QApplication(sys.argv)
-    qapp.setQuitOnLastWindowClosed(False)
-    _app = App(qapp)
+    qapp.setWindowIcon(app_icon())
+    holder: list = []
+    server = single_instance(lambda: holder and holder[0].bring_front())
+    if server is None:
+        return
+    app = App(qapp)
+    holder.append(app)
+    logging.info("HK File started")
     sys.exit(qapp.exec())
 
 

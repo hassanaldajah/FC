@@ -1,0 +1,42 @@
+"""Scan a page with the scanner Windows already knows about (WIA, built in, free).
+
+Windows shows its own scan dialog (paper size, colour, preview); we only save the
+result as a PNG so the rest of HK File can turn it into a PDF, compress it, etc.
+"""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from converters import _free_name
+
+WIA_DEVICE_SCANNER = 1
+WIA_INTENT_COLOR = 1
+WIA_BIAS_QUALITY = 0x20000
+WIA_FORMAT_PNG = "{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}"
+WIA_NO_DEVICE = -2145320939          # 0x80210015: no scanner connected
+WIA_OFFLINE = -2145320954            # 0x80210005: scanner switched off or busy
+
+
+class NoScanner(Exception):
+    """No scanner is connected, or it is switched off."""
+
+
+def scan_to(folder: Path) -> Path | None:
+    """Scan one page into folder. Returns the PNG, or None if the user cancelled."""
+    import comtypes
+    import comtypes.client
+
+    dialog = comtypes.client.CreateObject("WIA.CommonDialog")
+    try:
+        image = dialog.ShowAcquireImage(WIA_DEVICE_SCANNER, WIA_INTENT_COLOR, WIA_BIAS_QUALITY,
+                                        WIA_FORMAT_PNG, False, True, False)
+    except comtypes.COMError as e:
+        if e.hresult in (WIA_NO_DEVICE, WIA_OFFLINE):
+            raise NoScanner from e
+        raise
+    if image is None:                # the user closed the dialog
+        return None
+    out = _free_name(Path(folder) / f"Scan {time.strftime('%Y-%m-%d %H%M%S')}.png", "png", "")
+    image.SaveFile(str(out))
+    return out

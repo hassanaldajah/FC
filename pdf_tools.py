@@ -340,7 +340,7 @@ def pdf_menu(many: bool) -> list[tuple[str, str]]:
     """Top hexagon for PDFs: (label, key). Keys starting with '>' open a group."""
     first = ("Merge", "merge") if many else ("Split", "split")
     return [first, ("Convert", ">Convert"), ("Compress", "compress"),
-            ("Pages", ">Pages"), ("Security", ">Security"), ("Edit", ">Edit")]
+            ("Pages", ">Pages"), ("Security", ">Security"), ("Edit", ">Edit"), ("Zip", "zip")]
 
 
 def group_menu(name: str) -> list[tuple[str, str]]:
