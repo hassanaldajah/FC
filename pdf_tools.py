@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import pymupdf
+from typing import TYPE_CHECKING
 
 from converters import _free_name
+
+# PyMuPDF is imported inside the tools that use it: it takes about a second to load, and
+# FC should open at once.
+if TYPE_CHECKING:
+    import pymupdf
 
 
 def _folder(src: Path, tag: str) -> Path:
@@ -24,6 +28,8 @@ def _folder(src: Path, tag: str) -> Path:
 
 
 def _open(src: Path, password: str = "") -> pymupdf.Document:
+    import pymupdf
+
     doc = pymupdf.open(src)
     if doc.needs_pass and not doc.authenticate(password or ""):
         doc.close()
@@ -59,6 +65,8 @@ def parse_pages(text: str, count: int) -> list[int]:
 
 # ---------------------------------------------------------------- organise
 def merge(paths: list[Path], _arg: str = "") -> list[Path]:
+    import pymupdf
+
     paths = sorted(paths, key=lambda p: p.name.lower())
     out = _free_name(paths[0], "pdf", " (merged)")
     merged = pymupdf.open()
@@ -71,6 +79,8 @@ def merge(paths: list[Path], _arg: str = "") -> list[Path]:
 
 
 def split(src: Path, _arg: str = "") -> list[Path]:
+    import pymupdf
+
     folder = _folder(src, "pages")
     with _open(src) as doc:
         for i in range(doc.page_count):
@@ -139,6 +149,8 @@ def repair(src: Path, _arg: str = "") -> list[Path]:
 
 # ---------------------------------------------------------------- security
 def protect(src: Path, password: str) -> list[Path]:
+    import pymupdf
+
     if len(password) < 4:
         raise ValueError("use a password of at least 4 characters")
     with _open(src) as doc:
@@ -150,6 +162,8 @@ def protect(src: Path, password: str) -> list[Path]:
 
 
 def unlock(src: Path, password: str) -> list[Path]:
+    import pymupdf
+
     doc = pymupdf.open(src)
     try:
         if doc.needs_pass and not doc.authenticate(password or ""):
@@ -170,6 +184,8 @@ def strip_metadata(src: Path, _arg: str = "") -> list[Path]:
 
 # ---------------------------------------------------------------- edit
 def watermark(src: Path, text: str) -> list[Path]:
+    import pymupdf
+
     text = (text or "CONFIDENTIAL").strip()[:60]
     with _open(src) as doc:
         for page in doc:
@@ -185,6 +201,8 @@ def watermark(src: Path, text: str) -> list[Path]:
 
 
 def page_numbers(src: Path, _arg: str = "") -> list[Path]:
+    import pymupdf
+
     with _open(src) as doc:
         total = doc.page_count
         for i, page in enumerate(doc, 1):

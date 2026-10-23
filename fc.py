@@ -9,8 +9,11 @@ nothing is overwritten and nothing leaves the computer.
 """
 from __future__ import annotations
 
+import time
+
+STARTED = time.monotonic()           # the log says how long the octagon took to appear
+
 import ctypes
-import hashlib
 import logging
 import math
 import os
@@ -18,7 +21,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 import warnings
 from ctypes import wintypes
 from pathlib import Path
@@ -37,11 +39,12 @@ import explorer
 import file_tools
 import history
 import scanner
+from converters import child_env
 
 IS_WIN = sys.platform == "win32"
 APP_ID = "HassanAldajah.FC"
 INSTANCE_KEY = "FC-single-instance"
-VERSION = "1.1.1"                     # keep in step with version_info.txt and the release tag
+VERSION = "2.1.0"                     # keep in step with version_info.txt and the release tag
 HERE = Path(__file__).resolve().parent
 if IS_WIN:
     LOG_DIR = Path(os.environ.get("LOCALAPPDATA", str(HERE))) / "FC"
@@ -166,6 +169,8 @@ class HashJob(QThread):
         self.path = path
 
     def run(self):
+        import hashlib
+
         digest = hashlib.sha256()
         try:
             with open(self.path, "rb") as f:
@@ -410,6 +415,7 @@ class HexView(QObject):
         self.shot_version = 0
         self.shot_origin = QPoint(0, 0)
         self.was_minimized = False
+        self.shown_once = 0.0                    # seconds from start to the first frame on screen
 
         self.view = QQuickView()
         self.view.setTitle("FC")
@@ -525,6 +531,9 @@ class HexView(QObject):
             self.view.update()
             return
         self.view.frameSwapped.disconnect(self._after_warmup)
+        if not self.shown_once:
+            self.shown_once = time.monotonic() - STARTED
+            logging.info("octagon shown %.2f s after start", self.shown_once)
         self.view.setOpacity(1.0)
         self.view.raise_()
         self.view.requestActivate()
@@ -578,23 +587,54 @@ class HexView(QObject):
 
 
 # ------------------------------------------------------------------ opening things
+def xdg_open(target: str):
+    """Linux: open a file, folder or web page with the user's default app."""
+    subprocess.Popen(["xdg-open", target], env=child_env(), stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def _show_items(path: Path) -> bool:
+    """Linux: ask the file manager (Files, Dolphin, Nemo, Caja...) to open the folder with
+    the file selected, through the freedesktop FileManager1 D-Bus interface."""
+    try:
+        from PyQt6.QtDBus import QDBusConnection, QDBusMessage
+
+        msg = QDBusMessage.createMethodCall("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                                            "org.freedesktop.FileManager1", "ShowItems")
+        msg.setArguments([[QUrl.fromLocalFile(str(path)).toString()], ""])
+        reply = QDBusConnection.sessionBus().call(msg, timeout=3000)
+        return reply.type() == QDBusMessage.MessageType.ReplyMessage
+    except Exception:  # noqa: BLE001 - no session bus: plain xdg-open instead
+        return False
+
+
 def show_in_folder(path: Path):
     """Open the folder holding path, with the file selected where the file manager can."""
     if IS_WIN:
         subprocess.Popen([EXPLORER, "/select,", str(path)])
-    else:
-        subprocess.Popen(["xdg-open", str(Path(path).parent)])
+    elif not _show_items(Path(path)):
+        xdg_open(str(Path(path).parent))
 
 
 def open_folder(folder: Path):
-    subprocess.Popen([EXPLORER, str(folder)] if IS_WIN else ["xdg-open", str(folder)])
+    if IS_WIN:
+        subprocess.Popen([EXPLORER, str(folder)])
+    else:
+        xdg_open(str(folder))
 
 
 def open_file(path: Path):
     if IS_WIN:
         os.startfile(path)                       # opens in the photo viewer
     else:
-        subprocess.Popen(["xdg-open", str(path)])
+        xdg_open(str(path))
+
+
+def open_url(url: str):
+    if IS_WIN:
+        QDesktopServices.openUrl(QUrl(url))
+    else:                                        # Qt's own launcher would pass FC's library paths on
+        xdg_open(url)
 
 
 # ------------------------------------------------------------------ app
@@ -610,6 +650,7 @@ class App(QObject):
         self.last_sources: list[Path] = []      # what the last tool started from
         self.last_outputs: list[Path] = []      # and what it made
         self.workers: list[Worker] = []
+        self.pick_dir = str(Path.home())        # where "Choose files" opens; follows the last pick
         self.triggers = Triggers()
         self.triggers.fired.connect(self.open_from_explorer)
         self.go_home(centre=True)
@@ -671,8 +712,11 @@ class App(QObject):
         """Hash one file here, then open its VirusTotal page in the browser.
         Only the hash leaves the computer, never the file."""
         if self.hexagon.backend.home:
-            name, _ = QFileDialog.getOpenFileName(None, "FC: choose a file to check", "", "All files (*)")
+            name, _ = QFileDialog.getOpenFileName(None, "FC: choose a file to check", self.pick_dir,
+                                                  "All files (*)")
             target = Path(name) if name else None
+            if target:
+                self.pick_dir = str(target.parent)
         else:
             target = self.files[0] if self.files else None
         if target is None or not target.is_file():
@@ -690,7 +734,7 @@ class App(QObject):
             self.hexagon.flash("Could not read that file", 4)
             return
         QGuiApplication.clipboard().setText(digest)
-        QDesktopServices.openUrl(QUrl(f"https://www.virustotal.com/gui/file/{digest}"))
+        open_url(f"https://www.virustotal.com/gui/file/{digest}")
         self.hexagon.flash("Opened VirusTotal. Hash copied", 6)
 
     def open_for_files(self, files, at_cursor: bool = False):
@@ -711,9 +755,10 @@ class App(QObject):
 
     def on_choice(self, key: str):
         if key in PICK_FILTERS:
-            names, _ = QFileDialog.getOpenFileNames(None, "Choose files for FC", "",
+            names, _ = QFileDialog.getOpenFileNames(None, "Choose files for FC", self.pick_dir,
                                                     PICK_FILTERS[key])
             if names:
+                self.pick_dir = str(Path(names[0]).parent)
                 self.open_for_files([Path(n) for n in names])
         elif key == "recent:open":
             if self.results and Path(self.results[-1]).exists():
@@ -847,30 +892,34 @@ class App(QObject):
             self.hexagon.alert()                      # blink the taskbar button
 
 
-# ------------------------------------------------------------------ first-run setup
+# ------------------------------------------------------------------ first-run setup (Linux AppImage)
+# Windows has a real installer (packaging/windows/FC.iss); an AppImage is one loose file, so the
+# first run offers to put it somewhere permanent and add it to the menus.
 def install_dir() -> Path:
-    if IS_WIN:
-        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Programs" / "FC"
     return Path.home() / ".local" / "share" / "FC"
 
 
 def downloaded_binary() -> Path | None:
-    """The exe (or AppImage) the user started, if it is a release build that is not installed yet."""
-    if not getattr(sys, "frozen", False):
-        return None                                   # running from source
-    path = Path(os.environ.get("APPIMAGE") or (sys.executable if IS_WIN else "")) if (
-        IS_WIN or os.environ.get("APPIMAGE")) else None
-    if path is None or not path.is_file():
+    """The AppImage the user started, if it is not the installed copy (or an identical one)."""
+    appimage = os.environ.get("APPIMAGE")
+    if IS_WIN or not getattr(sys, "frozen", False) or not appimage:
         return None
-    return None if path.resolve().parent == install_dir().resolve() else path.resolve()
+    path = Path(appimage).resolve()
+    if not path.is_file() or path.parent == install_dir().resolve():
+        return None
+    installed = install_dir() / "FC.AppImage"
+    try:
+        if installed.stat().st_size == path.stat().st_size and installed.stat().st_mtime == path.stat().st_mtime:
+            return None                               # this very file is installed already
+    except OSError:
+        pass
+    return path
 
 
 def _desktop_folder() -> Path:
-    if IS_WIN:
-        import comtypes.client
-        return Path(comtypes.client.CreateObject("WScript.Shell").SpecialFolders("Desktop"))
     try:
-        out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=5).stdout.strip()
+        out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=5,
+                             env=child_env()).stdout.strip()
         if out:
             return Path(out)
     except (OSError, subprocess.SubprocessError):
@@ -878,58 +927,40 @@ def _desktop_folder() -> Path:
     return Path.home() / "Desktop"
 
 
-def _make_shortcut(link: Path, target: Path):
-    """Windows .lnk through WScript.Shell; paths travel in environment variables, never in the script text."""
-    script = ("$l=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FC_LNK);"
-              "$l.TargetPath=$env:FC_TARGET;$l.WorkingDirectory=Split-Path $env:FC_TARGET;"
-              "$l.IconLocation=$env:FC_TARGET+',0';"
-              "$l.Description='FC: convert, compress and edit files';$l.Save()")
-    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command", script], check=True,
-                   timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                   env={**os.environ, "FC_LNK": str(link), "FC_TARGET": str(target)})
-
-
 def install_app(source: Path, desktop: bool, menu: bool) -> Path:
-    """Copy the download to a permanent place and add the shortcuts the user ticked."""
+    """Copy the AppImage to ~/.local/share/FC and add the menu entries the user ticked."""
     folder = install_dir()
     folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / ("FC.exe" if IS_WIN else "FC.AppImage")
-    shutil.copy2(source, dest)
-    if IS_WIN:
-        import comtypes.client
-        shell = comtypes.client.CreateObject("WScript.Shell")
-        places = ([Path(shell.SpecialFolders("Desktop"))] if desktop else []) + (
-            [Path(shell.SpecialFolders("Programs"))] if menu else [])
-        for place in places:
-            _make_shortcut(place / "FC.lnk", dest)
-    else:
-        dest.chmod(0o755)
-        icon_dir = Path.home() / ".local" / "share" / "icons" / "hicolor" / "512x512" / "apps"
-        icon_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(HERE / "fc.png", icon_dir / "FC.png")
-        entry = ("[Desktop Entry]\nType=Application\nName=FC\n"
-                 "Comment=Convert, compress, merge, split and protect files\n"
-                 f'Exec="{dest}"\nIcon=FC\nCategories=Utility;\nTerminal=false\nStartupWMClass=FC\n')
-        if menu:
-            apps = Path.home() / ".local" / "share" / "applications"
-            apps.mkdir(parents=True, exist_ok=True)
-            (apps / "FC.desktop").write_text(entry, encoding="utf-8")
-        if desktop:
-            link = _desktop_folder() / "FC.desktop"
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.write_text(entry, encoding="utf-8")
-            link.chmod(0o755)
-            try:                                       # GNOME: let the icon launch without a warning
-                subprocess.run(["gio", "set", str(link), "metadata::trusted", "true"], timeout=5,
-                               capture_output=True)
-            except (OSError, subprocess.SubprocessError):
-                pass
+    dest = folder / "FC.AppImage"
+    part = folder / "FC.AppImage.part"                # copy, then swap in one step: works even while
+    shutil.copy2(source, part)                        # an older FC.AppImage is still running
+    part.chmod(0o755)
+    os.replace(part, dest)
+    icon_dir = Path.home() / ".local" / "share" / "icons" / "hicolor" / "512x512" / "apps"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HERE / "fc.png", icon_dir / "FC.png")
+    entry = ("[Desktop Entry]\nType=Application\nName=FC\n"
+             "Comment=Convert, compress, merge, split and protect files\n"
+             f'Exec="{dest}"\nIcon=FC\nCategories=Utility;\nTerminal=false\nStartupWMClass=FC\n')
+    if menu:
+        apps = Path.home() / ".local" / "share" / "applications"
+        apps.mkdir(parents=True, exist_ok=True)
+        (apps / "FC.desktop").write_text(entry, encoding="utf-8")
+    if desktop:
+        link = _desktop_folder() / "FC.desktop"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.write_text(entry, encoding="utf-8")
+        link.chmod(0o755)
+        try:                                           # GNOME: let the icon launch without a warning
+            subprocess.run(["gio", "set", str(link), "metadata::trusted", "true"], timeout=5,
+                           capture_output=True, env=child_env())
+        except (OSError, subprocess.SubprocessError):
+            pass
     return dest
 
 
 def offer_install() -> bool:
-    """First run of a downloaded copy: offer to install it with shortcuts, like an installer.
+    """First run of a downloaded AppImage: offer to install it with menu entries, like an installer.
     Returns True when it installed and started the installed copy, so this process should exit."""
     source = downloaded_binary()
     skip = LOG_DIR / "setup-declined"
@@ -944,7 +975,7 @@ def offer_install() -> bool:
     label.setWordWrap(True)
     layout.addWidget(label)
     desktop = QCheckBox("Create a shortcut on the Desktop")
-    menu = QCheckBox("Add FC to the Start menu" if IS_WIN else "Add FC to the applications menu")
+    menu = QCheckBox("Add FC to the applications menu")
     never = QCheckBox("Don't ask again, just run")
     desktop.setChecked(True)
     menu.setChecked(True)
@@ -967,7 +998,7 @@ def offer_install() -> bool:
         logging.exception("install failed")
         return False
     logging.info("installed to %s", dest)
-    subprocess.Popen([str(dest)], cwd=str(dest.parent), close_fds=True)
+    subprocess.Popen([str(dest)], cwd=str(dest.parent), close_fds=True, env=child_env(), start_new_session=True)
     return True
 
 
@@ -994,21 +1025,19 @@ def single_instance(on_show) -> QLocalServer | None:
     return server
 
 
-def selftest() -> int:
-    """Release check (fc --selftest): every bundled library loads. Run by the build workflow."""
-    import importlib
-    for name in ("PyQt6.QtQuick", "PyQt6.QtQml", "PyQt6.QtNetwork", "PIL.Image", "pymupdf",
-                 "pyzipper", "pptx", "pdf2docx", "imageio_ffmpeg"):
-        importlib.import_module(name)
-    import imageio_ffmpeg
-    ok = (HERE / "hex.qml").exists() and Path(imageio_ffmpeg.get_ffmpeg_exe()).exists()
-    print("FC", VERSION, "selftest", "ok" if ok else "FAILED")
-    return 0 if ok else 1
+def qt_platform() -> list[str]:
+    """Linux: use X11 (or XWayland inside a Wayland session) when it is there. Under pure Wayland
+    a window may not place itself, and Qt is not told when it is minimised, which the octagon
+    needs to come back from the taskbar; it still runs there, with those limits."""
+    if IS_WIN or os.environ.get("QT_QPA_PLATFORM") or not os.environ.get("DISPLAY"):
+        return []
+    return ["-platform", "xcb"]
 
 
 def main():
     if "--selftest" in sys.argv:
-        sys.exit(selftest())
+        import selftest
+        sys.exit(selftest.run(gui="--no-gui" not in sys.argv))
     os.chdir(HERE)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=LOG_DIR / "fc.log", level=logging.INFO,
@@ -1019,7 +1048,7 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
         except Exception:  # noqa: BLE001
             pass
-    qapp = QApplication(sys.argv)
+    qapp = QApplication(sys.argv + qt_platform())
     qapp.setDesktopFileName("FC")          # Linux: matches FC.desktop, so the taskbar shows our icon
     if offer_install():
         return

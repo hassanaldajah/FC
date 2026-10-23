@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from converters import _free_name
+from converters import _free_name, child_env
 
 WIA_DEVICE_SCANNER = 1
 WIA_INTENT_COLOR = 1
@@ -34,7 +34,7 @@ def _scan_sane(folder: Path) -> Path:
     try:
         with open(out, "wb") as f:
             done = subprocess.run([exe, "--format=png", "--resolution=300", "--mode=Color"],
-                                  stdout=f, stderr=subprocess.PIPE, timeout=300)
+                                  stdout=f, stderr=subprocess.PIPE, timeout=300, env=child_env())
     except subprocess.TimeoutExpired as e:
         out.unlink(missing_ok=True)
         raise NoScanner from e

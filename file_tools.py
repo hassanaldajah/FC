@@ -121,16 +121,13 @@ def split_image(src: Path, _arg: str = "") -> list[Path]:
 
 def watermark_image(src: Path, text: str) -> list[Path]:
     """A large, faint, diagonal line of text across the picture."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     text = (text or "CONFIDENTIAL").strip()[:60]
     img = _img_open_rgb(src).convert("RGBA")
     w, h = img.size
     size = max(16, int(min(w, h) / max(5, len(text)) * 1.7))
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", size)
-    except OSError:
-        font = ImageFont.load_default()
+    font = converters.font(size, bold=True)
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     draw.text((w / 2, h / 2), text, font=font, anchor="mm", fill=(255, 255, 255, 70),

@@ -1,12 +1,15 @@
-# Builds FC on GitHub's own machines when a version tag (v1.2.3) is pushed: FC.exe on Windows
-# and an AppImage on Linux. Each file is published to Releases with a SHA-256 checksum and a
-# signed build-provenance attestation, so anyone can check the download came from this
-# repository's code.
+# Builds FC on GitHub's own machines: the Windows installer and the Linux AppImage. Every build
+# runs FC's self-test (fc --selftest: every tool on sample files, then the octagon window); the
+# AppImage is tested on many Linux distributions before anything is published.
+# A version tag (v1.2.3) publishes both files to Releases with a SHA-256 checksum and a signed
+# build-provenance attestation, so anyone can check the download came from this repository's
+# code. "Run workflow" (any branch) builds and tests the same way without publishing.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions: {}            # nothing by default; each job asks only for what it needs
 
@@ -14,10 +17,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: write        # create the release and upload files
       id-token: write        # sign the provenance attestation (Sigstore, keyless)
@@ -33,38 +39,88 @@ jobs:
         with:
           python-version: "3.15"
 
-      - name: Tag must match the version in the code
+      - name: Versions must agree (and match the tag)
         shell: pwsh
         run: |
           $line = Select-String -Path fc.py -Pattern '^VERSION = "(.+)"' | Select-Object -First 1
           $version = $line.Matches[0].Groups[1].Value
-          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match VERSION $version in fc.py" }
+          if ($env:PUBLISH -eq 'true' -and "v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match VERSION $version in fc.py" }
           if (-not (Select-String -Path version_info.txt -SimpleMatch "'FileVersion', '$version'")) {
             throw "version_info.txt does not say $version"
           }
+          "VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install exact, hash-checked dependencies
         run: python -m pip install --require-hashes --no-deps -r requirements.txt -r requirements-build.txt
 
-      - name: Build the exe
+      - name: Build the app folder
         run: python -m PyInstaller --clean --noconfirm fc.spec
 
-      - name: Name the file and write its checksum
+      - name: Self-test the built app
         shell: pwsh
         run: |
-          $name = "FC-$($env:TAG.TrimStart('v'))-win64.exe"
-          Move-Item "dist/FC.exe" "dist/$name"
+          $p = Start-Process -FilePath dist\FC\FC.exe -ArgumentList '--selftest' -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\FC\selftest.txt"
+          if ($p.ExitCode -ne 0) { throw "self-test failed ($($p.ExitCode) checks)" }
+
+      - name: Install Inno Setup (pinned, checksum checked)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          Invoke-WebRequest $url -OutFile innosetup.exe
+          $hash = (Get-FileHash innosetup.exe -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f") { throw "Inno Setup checksum mismatch: $hash" }
+          $p = Start-Process innosetup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/PORTABLE=1',"/DIR=`"$pwd\inno`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Inno Setup did not install ($($p.ExitCode))" }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          & .\inno\ISCC.exe /Q "/DVersion=$env:VERSION" packaging\windows\FC.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: The installer must install, run and uninstall cleanly
+        shell: pwsh
+        run: |
+          $setup = "dist\FC-$env:VERSION-win64-setup.exe"
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "silent install failed ($($p.ExitCode))" }
+          $app = "$env:LOCALAPPDATA\Programs\FC"
+          if (-not (Test-Path "$app\FC.exe")) { throw "FC.exe was not installed" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\FC.lnk")) { throw "no Start menu entry" }
+          $p = Start-Process "$app\FC.exe" -ArgumentList '--selftest','--no-gui' -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\FC\selftest.txt" | Select-Object -Last 1
+          if ($p.ExitCode -ne 0) { throw "the installed FC failed its self-test" }
+          $p = Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          Start-Sleep -Seconds 5            # the uninstaller finishes in a helper process
+          if (Test-Path "$app\FC.exe") { throw "uninstall left FC.exe behind" }
+          "install, self-test and uninstall: ok"
+
+      - name: Write the checksum
+        shell: pwsh
+        run: |
+          $name = "FC-$env:VERSION-win64-setup.exe"
           $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name" | Out-File "dist/$name.sha256" -Encoding ascii -NoNewline
-          "EXE=dist/$name" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SETUP=dist/$name" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "SHA-256: $hash"
 
+      - name: Keep the installer with this run
+        if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-setup
+          path: dist/FC-*-win64-setup.exe*
+          retention-days: 7
+
       - name: Attest build provenance
+        if: env.PUBLISH == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ env.EXE }}
+          subject-path: ${{ env.SETUP }}
 
       - name: Publish the release
+        if: env.PUBLISH == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,15 +130,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create "$env:TAG" --repo "${{ github.repository }}" --title "FC $env:TAG" --generate-notes --verify-tag
           }
-          gh release upload "$env:TAG" "$env:EXE" "$env:EXE.sha256" --repo "${{ github.repository }}" --clobber
+          gh release upload "$env:TAG" "$env:SETUP" "$env:SETUP.sha256" --repo "${{ github.repository }}" --clobber
 
-  linux:
+  linux-build:
     runs-on: ubuntu-22.04      # the oldest glibc GitHub offers: the AppImage then runs on most distributions
     timeout-minutes: 45
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     env:
       TAG: ${{ github.ref_name }}
     steps:
@@ -94,11 +148,22 @@ jobs:
         with:
           python-version: "3.15"
 
-      - name: Tag must match the version in the code
+      - name: Versions must agree (and match the tag)
         run: |
           version="$(sed -n 's/^VERSION = "\([^"]*\)".*/\1/p' fc.py | head -n1)"
-          [ "v$version" = "$TAG" ] || { echo "Tag $TAG does not match VERSION $version in fc.py"; exit 1; }
+          if [ "$PUBLISH" = "true" ] && [ "v$version" != "$TAG" ]; then
+            echo "Tag $TAG does not match VERSION $version in fc.py"; exit 1
+          fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Qt's X11 helper libraries, so PyInstaller bundles them
+        run: |
+          # fresh installs often lack libxcb-cursor0 & co., which Qt 6 needs: they go inside the AppImage
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 \
+            libxcb-randr0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-xinerama0 libxcb-xinput0 \
+            xvfb desktop-file-utils
 
       - name: Install exact, hash-checked dependencies
         run: python -m pip install --require-hashes --no-deps -r requirements.txt -r requirements-build.txt
@@ -106,19 +171,112 @@ jobs:
       - name: Build the app folder
         run: python -m PyInstaller --clean --noconfirm fc.spec
 
-      - name: The built app must start and load its libraries
-        run: |
-          # the runner is a bare server: add the desktop libraries Qt needs (a normal Linux desktop has them)
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1 libxcb-cursor0
-          ./dist/FC/FC --selftest
+      - name: Self-test the built app
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ./dist/FC/FC --selftest
 
       - name: Wrap it in an AppImage and write its checksum
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq desktop-file-utils   # appimagetool validates FC.desktop
           bash packaging/linux/build-appimage.sh "$VERSION"
-          echo "APPIMAGE=dist/FC-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
           cat "dist/FC-${VERSION}-x86_64.AppImage.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage
+          path: |
+            dist/FC-*-x86_64.AppImage
+            dist/FC-*-x86_64.AppImage.sha256
+            dist/needs-glibc.txt
+          retention-days: 7
+
+  linux-desktop:
+    # a real Ubuntu machine rather than a container: the AppImage mounts itself with FUSE,
+    # the normal way, and needs no libfuse2
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: appimage
+      - name: Run the AppImage through FUSE
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fuse3 xvfb libegl1 libgl1 libfontconfig1
+          ! dpkg -s libfuse2t64 >/dev/null 2>&1 || echo "note: libfuse2 is installed here"
+          chmod +x FC-*-x86_64.AppImage
+          xvfb-run -a -s "-screen 0 1280x800x24" ./FC-*-x86_64.AppImage --selftest
+
+  linux-distros:
+    needs: linux-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # must-run: FC has to work there. auto: older systems; FC must either work or refuse
+          # with a clear message (decided by their glibc).
+          - { image: "ubuntu:22.04", run: must-run }
+          - { image: "ubuntu:24.04", run: must-run }
+          - { image: "ubuntu:26.04", run: must-run }
+          - { image: "linuxmintd/mint21.3-amd64", run: must-run }
+          - { image: "linuxmintd/mint22.2-amd64", run: must-run }
+          - { image: "debian:12", run: must-run }
+          - { image: "debian:13", run: must-run }
+          - { image: "kalilinux/kali-rolling", run: must-run }
+          - { image: "fedora:43", run: must-run }
+          - { image: "fedora:45", run: must-run }
+          - { image: "almalinux:10", run: must-run }
+          - { image: "archlinux:latest", run: must-run }
+          - { image: "manjarolinux/base:latest", run: must-run }
+          - { image: "opensuse/tumbleweed", run: must-run }
+          - { image: "opensuse/leap:16.0", run: must-run }
+          - { image: "opensuse/leap:15.6", run: auto }
+          - { image: "almalinux:9", run: auto }
+          - { image: "debian:11", run: auto }
+          - { image: "ubuntu:20.04", run: auto }
+    name: linux on ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: appimage
+          path: appimage
+      - name: Self-test in a fresh ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          RUN: ${{ matrix.run }}
+        run: |
+          app="$(ls appimage/FC-*-x86_64.AppImage)"
+          need="$(cat appimage/needs-glibc.txt)"
+          docker run --rm -v "$PWD:/w:ro" "$IMAGE" sh /w/packaging/linux/test-distro.sh "/w/$app" "$need" \
+            "$([ "$RUN" = must-run ] && echo must-run)"
+
+  linux-publish:
+    needs: [linux-build, linux-desktop, linux-distros]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: appimage
+          path: dist
+
+      - name: Find the AppImage
+        run: echo "APPIMAGE=$(ls dist/FC-*-x86_64.AppImage)" >> "$GITHUB_ENV"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

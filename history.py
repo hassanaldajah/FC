@@ -12,7 +12,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from converters import kind_of
+from converters import font, kind_of
 
 VERSIONS = ".fc-versions"
 
@@ -118,7 +118,7 @@ TYPE_LOOK = {
 
 def type_icon(path: Path, box: int):
     """A document icon with a folded corner, in the colour of its file type."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     colour, letter = TYPE_LOOK.get(path.suffix.lower(), ((110, 120, 150), path.suffix.upper().lstrip(".")[:4] or "?"))
     if path.is_dir():
@@ -136,28 +136,21 @@ def type_icon(path: Path, box: int):
         d.rounded_rectangle((4 + int(w * 0.18), y, 4 + int(w * 0.82), y + max(2, h // 60)), 2, fill=(214, 218, 228))
     badge = (4 - int(w * 0.12), 4 + int(h * 0.56), 4 + int(w * 0.70), 4 + int(h * 0.90))
     d.rounded_rectangle(badge, max(4, w // 16), fill=colour)
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", int((badge[3] - badge[1]) * (0.62 if len(letter) <= 1 else 0.42)))
-    except OSError:
-        font = ImageFont.load_default()
-    d.text(((badge[0] + badge[2]) / 2, (badge[1] + badge[3]) / 2), letter, font=font,
+    label = font(int((badge[3] - badge[1]) * (0.62 if len(letter) <= 1 else 0.42)), bold=True)
+    d.text(((badge[0] + badge[2]) / 2, (badge[1] + badge[3]) / 2), letter, font=label,
            fill="white", anchor="mm")
     return img
 
 
 def compare(before: Path, after: Path) -> Path:
     """Render a side-by-side 'before | after' card and return the PNG path."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     box = 560
     W, H = box * 2 + 90, box + 150
     card = Image.new("RGB", (W, H), (16, 20, 34))
     draw = ImageDraw.Draw(card)
-    try:
-        big = ImageFont.truetype("segoeuib.ttf", 26)
-        small = ImageFont.truetype("segoeui.ttf", 19)
-    except OSError:
-        big = small = ImageFont.load_default()
+    big, small = font(26, bold=True), font(19)
     b_size, a_size = _size(before), _size(after)
     change = (a_size - b_size) / b_size * 100 if b_size else 0
     for i, (title, path, size) in enumerate((("Before", before, b_size), ("After", after, a_size))):

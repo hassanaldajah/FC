@@ -1,4 +1,20 @@
 #!/bin/sh
 # Starts FC from inside the AppImage.
 HERE="$(dirname "$(readlink -f "$0")")"
+
+# The bundled libraries need this glibc or newer; build-appimage.sh reads it from them. On an
+# older system (or one without glibc, like Alpine) say so plainly instead of a linker error.
+NEED_GLIBC="@NEED_GLIBC@"
+have="$(getconf GNU_LIBC_VERSION 2>/dev/null | cut -d' ' -f2)"
+[ -n "$have" ] || have="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$')"
+if [ -z "$have" ] || awk -v h="$have" -v n="$NEED_GLIBC" 'BEGIN { split(h, a, "."); split(n, b, ".");
+        exit !(a[1] + 0 < b[1] + 0 || (a[1] + 0 == b[1] + 0 && a[2] + 0 < b[2] + 0)) }'; then
+    msg="FC needs Linux with glibc $NEED_GLIBC or newer (for example Ubuntu 22.04, Debian 12, Fedora 36, Linux Mint 21 or later). This system has ${have:-no glibc}."
+    echo "$msg" >&2
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        zenity --error --title=FC --text="$msg" 2>/dev/null || kdialog --title FC --error "$msg" 2>/dev/null \
+            || xmessage "$msg" 2>/dev/null || true
+    fi
+    exit 1
+fi
 exec "$HERE/usr/lib/FC/FC" "$@"

@@ -1,0 +1,4 @@
+# Linux scripts must keep LF line endings, even when checked out on Windows
+*.sh text eol=lf
+packaging/linux/AppRun text eol=lf
+packaging/linux/FC.desktop text eol=lf

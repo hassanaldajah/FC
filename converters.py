@@ -5,6 +5,7 @@ path of the file it wrote, next to the source and never over an existing file.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -62,6 +63,38 @@ def targets_for(paths: list[Path]) -> list[str]:
         options = [t for t in TARGETS[kind] if t != own and not (own == "jpeg" and t == "jpg")]
         common = options if common is None else [t for t in common if t in options]
     return (common or [])[:7]
+
+
+def child_env() -> dict[str, str]:
+    """Environment for the programs FC starts (LibreOffice, xdg-open, scanimage...).
+    Inside the Linux build, PyInstaller points LD_LIBRARY_PATH, QT_PLUGIN_PATH and
+    QML2_IMPORT_PATH at FC's own libraries; a file manager or LibreOffice built against
+    other versions would crash on them, so they get the user's original values back."""
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False) and not IS_WIN:
+        env.pop("QT_PLUGIN_PATH", None)
+        env.pop("QML2_IMPORT_PATH", None)
+        original = env.pop("LD_LIBRARY_PATH_ORIG", None)
+        if original:
+            env["LD_LIBRARY_PATH"] = original
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
+def font(size: int, bold: bool = False):
+    """A clean sans-serif font at this size: Segoe UI on Windows; on Linux the first of
+    DejaVu, Liberation or Noto Sans it finds, else Pillow's own scalable font."""
+    from PIL import ImageFont
+
+    names = (("segoeuib.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "NotoSans-Bold.ttf") if bold
+             else ("segoeui.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf", "NotoSans-Regular.ttf"))
+    for name in names:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size)
 
 
 def _free_name(src: Path, ext: str, suffix: str = "") -> Path:
@@ -143,7 +176,8 @@ def _soffice(src: Path, ext: str) -> Path:
         subprocess.run([exe, f"-env:UserInstallation={(tmp / 'profile').as_uri()}", "--headless",
                         "--convert-to", "txt:Text" if want == "txt" else want,
                         "--outdir", str(tmp), str(src)],
-                       check=True, timeout=900, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       check=True, timeout=900, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       env=child_env())
         made = tmp / f"{src.stem}.{want}"
         if not made.exists():
             raise ValueError("LibreOffice could not convert this file")
