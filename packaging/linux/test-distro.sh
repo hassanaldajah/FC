@@ -34,8 +34,8 @@ fi
 # a supported system: add what any desktop has, then run the whole self-test
 if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends xvfb xauth libgl1 libegl1 libgl1-mesa-dri libglib2.0-0 \
+    apt-get -o Acquire::Retries=5 update -qq                 # mirrors (Kali's especially) can be flaky
+    apt-get -o Acquire::Retries=5 install -y -qq --no-install-recommends xvfb xauth libgl1 libegl1 libgl1-mesa-dri libglib2.0-0 \
         libfontconfig1 libfreetype6 fonts-dejavu-core libx11-6 libx11-xcb1 libdbus-1-3 >/dev/null
 elif command -v dnf >/dev/null 2>&1; then
     dnf install -y -q mesa-libGL mesa-libEGL mesa-dri-drivers glib2 fontconfig freetype dejavu-sans-fonts \
@@ -45,7 +45,9 @@ elif command -v zypper >/dev/null 2>&1; then
     zypper --non-interactive --quiet install --no-recommends xorg-x11-server-Xvfb Mesa-libGL1 Mesa-libEGL1 Mesa-dri \
         libglib-2_0-0 fontconfig libfreetype6 dejavu-fonts libX11-6 libX11-xcb1 libdbus-1-3 >/dev/null
 elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm --needed --quiet xorg-server-xvfb mesa glib2 fontconfig freetype2 ttf-dejavu \
+    # a full upgrade: on Arch and Manjaro, installing from a newer repository onto an older image
+    # without one ("partial upgrade") leaves programs missing their libraries
+    pacman -Syu --noconfirm --needed --quiet xorg-server-xvfb mesa glib2 fontconfig freetype2 ttf-dejavu \
         libx11 dbus >/dev/null
 else
     echo "unknown package manager"; exit 1
