@@ -70,8 +70,13 @@ jobs:
           Invoke-WebRequest $url -OutFile innosetup.exe
           $hash = (Get-FileHash innosetup.exe -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f") { throw "Inno Setup checksum mismatch: $hash" }
-          $p = Start-Process innosetup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/PORTABLE=1',"/DIR=`"$pwd\inno`"" -Wait -PassThru
+          # wait for the setup itself only: when it is done it opens the Inno Setup editor
+          # (Compil32), which -Wait would wait for forever
+          $p = Start-Process innosetup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/PORTABLE=1',"/DIR=`"$pwd\inno`"" -PassThru
+          if (-not $p.WaitForExit(300000)) { throw "Inno Setup's installer did not finish in 5 minutes" }
+          Get-Process Compil32 -ErrorAction SilentlyContinue | Stop-Process -Force
           if ($p.ExitCode -ne 0) { throw "Inno Setup did not install ($($p.ExitCode))" }
+          if (-not (Test-Path inno\ISCC.exe)) { throw "ISCC.exe is missing" }
 
       - name: Build the installer
         shell: pwsh
@@ -83,7 +88,8 @@ jobs:
         shell: pwsh
         run: |
           $setup = "dist\FC-$env:VERSION-win64-setup.exe"
-          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+          if (-not $p.WaitForExit(600000)) { throw "the installer did not finish in 10 minutes" }
           if ($p.ExitCode -ne 0) { throw "silent install failed ($($p.ExitCode))" }
           $app = "$env:LOCALAPPDATA\Programs\FC"
           if (-not (Test-Path "$app\FC.exe")) { throw "FC.exe was not installed" }
@@ -91,8 +97,10 @@ jobs:
           $p = Start-Process "$app\FC.exe" -ArgumentList '--selftest','--no-gui' -Wait -PassThru
           Get-Content "$env:LOCALAPPDATA\FC\selftest.txt" | Select-Object -Last 1
           if ($p.ExitCode -ne 0) { throw "the installed FC failed its self-test" }
-          $p = Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
-          Start-Sleep -Seconds 5            # the uninstaller finishes in a helper process
+          Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' | Out-Null
+          # the uninstaller hands over to a copy of itself and returns at once: watch the files instead
+          $deadline = (Get-Date).AddMinutes(5)
+          while ((Test-Path "$app\FC.exe") -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
           if (Test-Path "$app\FC.exe") { throw "uninstall left FC.exe behind" }
           "install, self-test and uninstall: ok"
 
