@@ -7,8 +7,9 @@ HERE="$(dirname "$(readlink -f "$0")")"
 NEED_GLIBC="@NEED_GLIBC@"
 have="$(getconf GNU_LIBC_VERSION 2>/dev/null | cut -d' ' -f2)"
 [ -n "$have" ] || have="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$')"
-if [ -z "$have" ] || awk -v h="$have" -v n="$NEED_GLIBC" 'BEGIN { split(h, a, "."); split(n, b, ".");
-        exit !(a[1] + 0 < b[1] + 0 || (a[1] + 0 == b[1] + 0 && a[2] + 0 < b[2] + 0)) }'; then
+h_major="${have%%.*}"; h_minor="${have#*.}"; h_minor="${h_minor%%.*}"
+n_major="${NEED_GLIBC%%.*}"; n_minor="${NEED_GLIBC#*.}"; n_minor="${n_minor%%.*}"
+if [ -z "$have" ] || [ "$h_major" -lt "$n_major" ] || { [ "$h_major" -eq "$n_major" ] && [ "$h_minor" -lt "$n_minor" ]; }; then
     msg="FC needs Linux with glibc $NEED_GLIBC or newer (for example Ubuntu 22.04, Debian 12, Fedora 36, Linux Mint 21 or later). This system has ${have:-no glibc}."
     echo "$msg" >&2
     if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then

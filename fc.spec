@@ -31,9 +31,10 @@ if WIN:   # on Linux the OpenCV module links libavcodec & co. directly, so those
 # Linux: libraries every desktop already has, in versions that must match its graphics drivers,
 # GTK and fonts. Bundling the build machine's older copies breaks newer systems (e.g. Mesa's
 # drivers need a newer libstdc++ than Ubuntu 22.04's), so the system's own are used. Libraries a
-# fresh install may lack (libxcb-cursor, libxkbcommon-x11, the other xcb helpers) stay bundled.
+# fresh install may lack (libxcb-cursor, libxkbcommon-x11, the other xcb helpers, and libgthread,
+# an empty shim that openSUSE packages on its own) stay bundled.
 SYSTEM_LIBS = re.compile(r"^(libstdc\+\+|libgcc_s|libglib-2\.0|libgobject-2\.0|libgio-2\.0|libgmodule-2\.0|"
-                         r"libgthread-2\.0|libfontconfig|libfreetype|libharfbuzz|libX11|libX11-xcb|"
+                         r"libfontconfig|libfreetype|libharfbuzz|libX11|libX11-xcb|"
                          r"libdbus-1|libz|libexpat|libuuid|libselinux|libmount|libblkid|libpcre2-8|"
                          r"libsystemd|libudev|libcap|libgcrypt|libgpg-error)\.so(\.|$)")
 

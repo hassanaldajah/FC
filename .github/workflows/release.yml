@@ -63,25 +63,29 @@ jobs:
           Get-Content "$env:LOCALAPPDATA\FC\selftest.txt"
           if ($p.ExitCode -ne 0) { throw "self-test failed ($($p.ExitCode) checks)" }
 
-      - name: Install Inno Setup (pinned, checksum checked)
+      - name: Find or install Inno Setup
         shell: pwsh
         run: |
-          $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
-          Invoke-WebRequest $url -OutFile innosetup.exe
-          $hash = (Get-FileHash innosetup.exe -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f") { throw "Inno Setup checksum mismatch: $hash" }
-          # wait for the setup itself only: when it is done it opens the Inno Setup editor
-          # (Compil32), which -Wait would wait for forever
-          $p = Start-Process innosetup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/PORTABLE=1',"/DIR=`"$pwd\inno`"" -PassThru
-          if (-not $p.WaitForExit(300000)) { throw "Inno Setup's installer did not finish in 5 minutes" }
-          Get-Process Compil32 -ErrorAction SilentlyContinue | Stop-Process -Force
-          if ($p.ExitCode -ne 0) { throw "Inno Setup did not install ($($p.ExitCode))" }
-          if (-not (Test-Path inno\ISCC.exe)) { throw "ISCC.exe is missing" }
+          # GitHub's Windows image ships Inno Setup 6; installing a second copy next to it hangs
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+            Invoke-WebRequest $url -OutFile innosetup.exe
+            $hash = (Get-FileHash innosetup.exe -Algorithm SHA256).Hash.ToLower()
+            if ($hash -ne "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f") { throw "Inno Setup checksum mismatch: $hash" }
+            $p = Start-Process innosetup.exe -PassThru -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',
+              '/CURRENTUSER','/PORTABLE=1','/MERGETASKS="!fileassoc,!desktopicon"',"/DIR=`"$pwd\inno`"","/LOG=`"$pwd\inno-setup.log`""
+            if (-not $p.WaitForExit(300000)) { Get-Content inno-setup.log -Tail 30; throw "Inno Setup's installer did not finish in 5 minutes" }
+            if ($p.ExitCode -ne 0) { Get-Content inno-setup.log -Tail 30; throw "Inno Setup did not install ($($p.ExitCode))" }
+            $iscc = "$pwd\inno\ISCC.exe"
+          }
+          "using $iscc"
+          "ISCC=$iscc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build the installer
         shell: pwsh
         run: |
-          & .\inno\ISCC.exe /Q "/DVersion=$env:VERSION" packaging\windows\FC.iss
+          & $env:ISCC /Q "/DVersion=$env:VERSION" packaging\windows\FC.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
       - name: The installer must install, run and uninstall cleanly

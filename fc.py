@@ -228,6 +228,32 @@ def app_icon() -> QIcon:
     return QIcon(str(icon)) if icon.exists() else QIcon()
 
 
+class Snapshot(QThread):
+    """Copies one screen for the glass, at half size: the glass blurs it anyway, and a small
+    picture is quick for the graphics card to take. On Windows it runs on its own thread
+    (Qt may capture the screen from any thread there), so the octagon never stalls for it."""
+    done = pyqtSignal(QImage)
+
+    def __init__(self, screen):
+        super().__init__()
+        self.screen = screen
+
+    @staticmethod
+    def take(screen) -> QImage:
+        try:
+            img = screen.grabWindow(0).toImage()
+        except Exception:  # noqa: BLE001 - no picture only means flat glass
+            logging.exception("desktop snapshot failed")
+            return QImage()
+        if img.isNull():
+            return img
+        return img.scaled(max(1, img.width() // 2), max(1, img.height() // 2),
+                          Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+    def run(self):
+        self.done.emit(self.take(self.screen))
+
+
 class ShotProvider(QQuickImageProvider):
     """Hands the blurred-glass layer a snapshot of the desktop behind us."""
     def __init__(self):
@@ -239,8 +265,14 @@ class ShotProvider(QQuickImageProvider):
 
 
 class Backend(QObject):
-    """State shared with hex.qml."""
-    changed = pyqtSignal()
+    """State shared with hex.qml. Each kind of change has its own signal, so moving the window
+    (two updates per mouse move) does not make every label and menu re-read from Python."""
+    menuChanged = pyqtSignal()
+    flashChanged = pyqtSignal()
+    dropChanged = pyqtSignal()
+    windowMoved = pyqtSignal()
+    shotChanged = pyqtSignal()
+    openedChanged = pyqtSignal()           # never sent: QML reads firstOpen only when opening
     openRequested = pyqtSignal()
     closeRequested = pyqtSignal(str)
     optionsReplaced = pyqtSignal()
@@ -259,6 +291,7 @@ class Backend(QObject):
         self._drop = False
         self._win = (0, 0)
         self._shot = ""
+        self._shot_size = (0, 0)
         self._calm = reduced_motion()
         self._first = True                   # the opening animation plays once
         self.kind = "neutral"                 # tint of the menus for the current files
@@ -270,40 +303,46 @@ class Backend(QObject):
         self.flash_timer.timeout.connect(lambda: self.set_flash(""))
 
     # ---- properties read by QML
-    @pyqtProperty("QVariantList", notify=changed)
+    @pyqtProperty("QVariantList", notify=menuChanged)
     def options(self): return self._options
 
-    @pyqtProperty(str, notify=changed)
+    @pyqtProperty(str, notify=menuChanged)
     def title(self): return self._title
 
-    @pyqtProperty(str, notify=changed)
+    @pyqtProperty(str, notify=flashChanged)
     def flash(self): return self._flash
 
-    @pyqtProperty(bool, notify=changed)
+    @pyqtProperty(bool, notify=menuChanged)
     def canGoBack(self): return bool(self.stack) or not self.home
 
-    @pyqtProperty(bool, notify=changed)
+    @pyqtProperty(bool, notify=menuChanged)
     def atHome(self): return self.home and not self.stack
 
     @pyqtProperty(str, constant=True)
     def logoUrl(self): return QUrl.fromLocalFile(str(HERE / "fc-mark.png")).toString()
 
-    @pyqtProperty(bool, notify=changed)
+    @pyqtProperty(bool, notify=dropChanged)
     def dropActive(self): return self._drop
 
-    @pyqtProperty(float, notify=changed)
+    @pyqtProperty(float, notify=windowMoved)
     def winX(self): return float(self._win[0])
 
-    @pyqtProperty(float, notify=changed)
+    @pyqtProperty(float, notify=windowMoved)
     def winY(self): return float(self._win[1])
 
-    @pyqtProperty(str, notify=changed)
+    @pyqtProperty(str, notify=shotChanged)
     def shotUrl(self): return self._shot
+
+    @pyqtProperty(float, notify=shotChanged)
+    def shotW(self): return float(self._shot_size[0])        # the snapshot's size on screen
+
+    @pyqtProperty(float, notify=shotChanged)
+    def shotH(self): return float(self._shot_size[1])
 
     @pyqtProperty(bool, constant=True)
     def reducedMotion(self): return self._calm
 
-    @pyqtProperty(bool, notify=changed)
+    @pyqtProperty(bool, notify=openedChanged)
     def firstOpen(self): return self._first
 
     @pyqtSlot()
@@ -322,22 +361,24 @@ class Backend(QObject):
                           "color": COLORS[HOME_COLOR.get(k, "neutral") if self.home else self.kind]}
                          for lbl, k in options]
         self._title = title
-        self.changed.emit()
+        self.menuChanged.emit()
         self.optionsReplaced.emit()
 
     def set_flash(self, text: str, seconds: float = 0):
         self._flash = text
-        self.changed.emit()
+        self.flashChanged.emit()
         if text and seconds:
             self.flash_timer.start(int(seconds * 1000))
 
     def set_window(self, x: int, y: int):
-        self._win = (x, y)
-        self.changed.emit()
+        if (x, y) != self._win:
+            self._win = (x, y)
+            self.windowMoved.emit()
 
-    def set_shot(self, url: str):
+    def set_shot(self, url: str, width: int, height: int):
         self._shot = url
-        self.changed.emit()
+        self._shot_size = (width, height)
+        self.shotChanged.emit()
 
     # ---- slots called from QML
     @pyqtSlot(int)
@@ -369,7 +410,7 @@ class Backend(QObject):
     @pyqtSlot(bool)
     def setDropActive(self, on: bool):
         self._drop = on
-        self.changed.emit()
+        self.dropChanged.emit()
 
     @pyqtSlot("QVariantList")
     def dropUrls(self, urls):
@@ -416,6 +457,11 @@ class HexView(QObject):
         self.shot_origin = QPoint(0, 0)
         self.was_minimized = False
         self.shown_once = 0.0                    # seconds from start to the first frame on screen
+        self._grabbing = False                   # a desktop snapshot is under way
+        self._grab_waiters: list = []            # what to do once it is ready
+        self._jobs: list[Snapshot] = []
+        self._last_grab = 0.0
+        self._warming = False
 
         self.view = QQuickView()
         self.view.setTitle("FC")
@@ -433,7 +479,7 @@ class HexView(QObject):
         self.view.yChanged.connect(self._moved)
         self.settle = QTimer(singleShot=True, interval=180)      # a move has ended: fresh glass
         self.settle.timeout.connect(self._refresh_glass)
-        self.backend.glassRequested.connect(self._refresh_glass)
+        self.backend.glassRequested.connect(self._glass_on_hover)
         self.view.xChanged.connect(self.settle.start)
         self.view.yChanged.connect(self.settle.start)
         self.view.windowStateChanged.connect(self._state_changed)
@@ -483,44 +529,73 @@ class HexView(QObject):
             self.view.setPosition(x, y)
         QTimer.singleShot(30, self._grab_and_show)
 
-    def _grab_desktop(self):
-        """Snapshot what is behind the window for the glass. While grabbing, the window is
-        excluded from screen capture (Windows 10 2004+), so it never photographs itself."""
+    def _hwnd(self):
+        return wintypes.HWND(int(self.view.winId()))
+
+    def _grab_desktop(self, then=None):
+        """Snapshot what is behind the window for the glass, then call then(img, screen).
+        While grabbing, the window is excluded from screen capture (Windows 10 2004+), so it
+        never photographs itself."""
+        if then is not None:
+            self._grab_waiters.append(then)
+        if self._grabbing:                    # the snapshot under way serves this call too
+            return
+        self._grabbing = True
+        self._last_grab = time.monotonic()
+        self.settle.stop()                    # this snapshot is fresh: no second one after it
         centre = self.view.geometry().center()
         screen = QGuiApplication.screenAt(centre) or QGuiApplication.primaryScreen()
-        excluded = False
-        if IS_WIN:
-            hwnd = wintypes.HWND(int(self.view.winId()))
-            WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
-            excluded = bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
-        try:
-            img = screen.grabWindow(0).toImage()
-        finally:
-            if excluded:
-                ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)
-        self.settle.stop()                   # this snapshot is fresh: no second grab after it
+        if not IS_WIN:                        # X11: Qt captures the screen on this thread only
+            self._grab_done(Snapshot.take(screen), screen, False)
+            return
+        WDA_EXCLUDEFROMCAPTURE = 0x11
+        excluded = bool(ctypes.windll.user32.SetWindowDisplayAffinity(self._hwnd(), WDA_EXCLUDEFROMCAPTURE))
+        job = Snapshot(screen)
+        job.done.connect(lambda img, s=screen, e=excluded: self._grab_done(img, s, e))
+        job.finished.connect(lambda j=job: self._jobs.remove(j))
+        self._jobs.append(job)
+        job.start()
+
+    def _grab_done(self, img: QImage, screen, excluded: bool):
+        if excluded:
+            ctypes.windll.user32.SetWindowDisplayAffinity(self._hwnd(), 0x0)     # WDA_NONE
+        self._grabbing = False
         self.provider.image = img
-        self.shot_origin = screen.geometry().topLeft()
+        geo = screen.geometry()
+        self.shot_origin = geo.topLeft()
         self.shot_version += 1
-        self.backend.set_shot(f"image://shot/{self.shot_version}")
+        self.backend.set_shot(f"image://shot/{self.shot_version}", geo.width(), geo.height())
         self._moved()
-        return img, screen
+        waiters, self._grab_waiters = self._grab_waiters, []
+        for then in waiters:
+            then(img, screen)
 
     def _refresh_glass(self):
-        """Re-take the snapshot after a move, or when the mouse comes back."""
-        if self.view.isVisible() and not self.is_minimized() and self.view.opacity() > 0:
+        """Re-take the snapshot after a move. Windows only: elsewhere FC cannot keep itself
+        out of the picture while it is visible, so the snapshot taken while opening stays."""
+        if IS_WIN and self.view.isVisible() and not self.is_minimized() and self.view.opacity() > 0:
             self._grab_desktop()
 
+    def _glass_on_hover(self):
+        """The mouse came back: what is behind may have changed (at most one snapshot per 3 s)."""
+        if time.monotonic() - self._last_grab > 3:
+            self._refresh_glass()
+
     def _grab_and_show(self):
-        img, screen = self._grab_desktop()
+        self._grab_desktop(then=self._warm_up)
+
+    def _warm_up(self, img: QImage, screen):
         if img.isNull() or all(img.pixelColor(img.width() * i // 5, img.height() * j // 5).value() == 0
                                for i in range(1, 5) for j in range(1, 5)):
             logging.warning("desktop snapshot is empty (%sx%s, dpr %s): the glass will look flat",
                             img.width(), img.height(), screen.devicePixelRatio())
         if os.environ.get("FC_DEBUG_SHOT"):           # troubleshooting: keep what the glass sees
             img.save(str(LOG_DIR / "last-snapshot.png"))
+        if self._warming:
+            return
         # let the GPU upload and blur the new snapshot while we are still
         # invisible; the animation starts only once that work is done
+        self._warming = True
         self._frames_left = 2
         self.view.frameSwapped.connect(self._after_warmup)
         self.view.update()
@@ -531,6 +606,7 @@ class HexView(QObject):
             self.view.update()
             return
         self.view.frameSwapped.disconnect(self._after_warmup)
+        self._warming = False
         if not self.shown_once:
             self.shown_once = time.monotonic() - STARTED
             logging.info("octagon shown %.2f s after start", self.shown_once)
@@ -569,6 +645,8 @@ class HexView(QObject):
 
     def _close_finished(self, kind: str):
         if kind == "quit":
+            for job in list(self._jobs):          # a snapshot thread must not outlive the app
+                job.wait(2000)
             QGuiApplication.instance().quit()
         else:
             self.view.showMinimized()

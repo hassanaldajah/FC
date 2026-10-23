@@ -20,6 +20,9 @@ Item {
     readonly property real corner: 4             // crisp, slightly softened corners everywhere
     readonly property real rFrame: rOut + 11     // glass frame around the panes
     readonly property bool calm: backend.reducedMotion
+    // the edge colours and the breathing centre move only while the octagon is in use (mouse
+    // over it, or it is the active window): left alone it draws nothing, so it costs nothing
+    readonly property bool lively: !calm && (windowHover.hovered || Window.active || backend.dropActive)
     readonly property int sideCount: 8           // an octagon with a flat top: eight tool panes
     readonly property real stepDeg: 360 / sideCount
     // clockwise from the top pane: the order keys and focus move in
@@ -49,9 +52,16 @@ Item {
         var i = Math.min(stops.length - 2, Math.floor(t))
         return mix(stops[i], stops[i + 1], t - i)
     }
-    // the same colours as a loop (t wraps at 1): the glass edge cycles through them
-    property real rimPhase: 0
-    NumberAnimation on rimPhase { from: 0; to: 1; duration: 9000; loops: Animation.Infinite; running: !root.calm }
+    // the same colours as a loop (t wraps at 1): the glass edge cycles through them. The
+    // animation stops (not pauses: a paused one still redraws every frame) when the octagon is
+    // not in use, and carries on from the same colours when it is
+    property real rimBase: 0
+    property real rimT: 0
+    readonly property real rimPhase: rimBase + rimT
+    NumberAnimation on rimT {
+        from: 0; to: 1; duration: 9000; loops: Animation.Infinite; running: root.lively
+        onRunningChanged: if (!running) { root.rimBase = (root.rimBase + root.rimT) % 1; root.rimT = 0 }
+    }
     function ringColor(t) {
         var c = [Qt.rgba(0.93, 0.30, 0.90, 1), Qt.rgba(0.60, 0.42, 1.0, 1), Qt.rgba(0.28, 0.80, 1.0, 1),
                  Qt.rgba(0.20, 0.86, 0.52, 1), Qt.rgba(0.28, 0.80, 1.0, 1), Qt.rgba(0.60, 0.42, 1.0, 1)]
@@ -211,7 +221,9 @@ Item {
             id: desk
             anchors.fill: parent
             visible: false
-            Image { x: -backend.winX; y: -backend.winY; source: backend.shotUrl; cache: false; smooth: true }
+            // the snapshot is half size (see Snapshot in fc.py): drawn at the screen's size
+            Image { x: -backend.winX; y: -backend.winY; width: backend.shotW; height: backend.shotH
+                    source: backend.shotUrl; cache: false; smooth: true }
         }
         Item {
             id: glassMask
@@ -520,14 +532,16 @@ Item {
             property real introT: 1
             Behavior on glow { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             Behavior on dropScale { enabled: !root.calm; SpringAnimation { spring: 4; damping: 0.55 } }
-            function pulse() { if (!root.calm) breatheAnim.restart() }
+            function pulse() { if (root.lively) breatheAnim.restart() }
             SequentialAnimation on breathe {
                 id: breatheAnim
                 loops: Animation.Infinite
-                running: !root.calm
+                running: root.lively
+                onRunningChanged: if (!running) breatheRest.start()      // settle, then stop drawing
                 NumberAnimation { from: 0; to: 1; duration: 1800; easing.type: Easing.InOutSine }
                 NumberAnimation { from: 1; to: 0; duration: 1800; easing.type: Easing.InOutSine }
             }
+            NumberAnimation { id: breatheRest; target: hub; property: "breathe"; to: 0; duration: 400; easing.type: Easing.OutCubic }
             opacity: Math.min(1, hub.introT * 1.5)
             transform: [
                 Rotation { origin.x: root.cx; origin.y: root.cy; angle: (1 - hub.introT) * -25 },
