@@ -18,8 +18,9 @@ cp fc.png AppDir/FC.png
 cp fc.png AppDir/.DirIcon
 
 # the newest glibc symbol any bundled program or library asks for = the oldest glibc FC runs on
-NEED_GLIBC="$(find AppDir/usr/lib/FC -type f \( -name '*.so*' -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null \
-    | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/GLIBC_//' | sort -uV | tail -n1)"
+# (objdump fails on the few files that are not ELF, such as scripts: that is fine)
+NEED_GLIBC="$( { find AppDir/usr/lib/FC -type f \( -name '*.so*' -o -perm -u+x \) -exec objdump -T {} + 2>/dev/null || true; } \
+    | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/GLIBC_//' | sort -uV | tail -n1 || true)"
 [ -n "$NEED_GLIBC" ] || { echo "could not work out the glibc version the bundle needs"; exit 1; }
 echo "the bundle needs glibc $NEED_GLIBC or newer"
 sed "s/@NEED_GLIBC@/$NEED_GLIBC/" packaging/linux/AppRun > AppDir/AppRun
