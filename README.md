@@ -42,8 +42,8 @@ chmod +x FC-2.1.0-x86_64.AppImage && ./FC-2.1.0-x86_64.AppImage
 ```
 - Runs on 64-bit Linux with glibc 2.35 or newer. Every release is tested automatically on Ubuntu 22.04, 24.04 and
   26.04, Linux Mint 21 and 22, Debian 12 and 13, Kali, Fedora 43 and 45, AlmaLinux 10, Arch, Manjaro,
-  openSUSE Tumbleweed and Leap 16 (and on distributions based on these, such as Pop!_OS, Zorin and elementary).
-  On older systems (Ubuntu 20.04, Debian 11, RHEL/AlmaLinux 9, openSUSE Leap 15) and on musl systems such as
+  openSUSE Tumbleweed, Leap 15.6 and Leap 16 (and on distributions based on these, such as Pop!_OS, Zorin and
+  elementary). On older systems (Ubuntu 20.04, Debian 11, RHEL/AlmaLinux/Rocky 9) and on musl systems such as
   Alpine it shows a message saying so instead of starting.
 - Nothing to install first: the libraries Qt needs (`libxcb-cursor0` and the like) are inside the AppImage, and
   it needs no `libfuse2`.
