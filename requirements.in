@@ -1,7 +1,7 @@
 # Direct dependencies of FC (Windows and Linux). After editing, rebuild the hashed lock (requirements.txt):
 #   py -m venv lockenv && lockenv\Scripts\python -m pip install -r requirements.in
 #   py tools\lock.py lockenv\Scripts\python.exe requirements.txt
-PyQt6==6.11.0
+PyQt6==6.12.0
 pynput==1.8.2
 comtypes==1.4.17; sys_platform == "win32"
 Pillow>=13.0.0
