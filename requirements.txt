@@ -1,5 +1,8 @@
 # Exact versions with hashes. Install with:  pip install --require-hashes -r requirements.txt
 # Regenerated from requirements.in (see the README).
+comtypes==1.5.0 \
+    --hash=sha256:831ddb867bc17bc89cac525b4f32132ebd4bef1ffe6432406ec9f5d858c1a122 \
+    --hash=sha256:c648ed3b243b1eb3b7cb893a873d1b35104ca1c8922061f4b1efafeb255bacb5
 evdev==2.0.0 \
     --hash=sha256:442fb3f4c8dfc9e61e901133c356220c02d663eca8f34722e0cecdd637eba504
 fire==0.7.1 \
